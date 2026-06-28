@@ -123,5 +123,6 @@ mysql_password.txt
 CHANGES_SUMMARY.md
 RESOURCE_LIMITS_IMPLEMENTATION.md
 
-# Project guidance for Claude Code
+# Claude Code session files
+.claude/
 CLAUDE.md
