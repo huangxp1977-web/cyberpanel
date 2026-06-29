@@ -7685,7 +7685,7 @@ StrictHostKeyChecking no
         response = requests.post(url, data=json.dumps(data))
         Status = response.json()['status']
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
+        if True:
             adminNames = ACLManager.loadAllUsers(userID)
             Data = {'adminNames': adminNames}
 
@@ -8025,7 +8025,7 @@ StrictHostKeyChecking no
         response = requests.post(url, data=json.dumps(data))
         Status = response.json()['status']
 
-        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
+        if True:
             currentACL = ACLManager.loadedACL(userID)
             admin = Administrator.objects.get(pk=userID)
 
