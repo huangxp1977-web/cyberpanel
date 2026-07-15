@@ -507,38 +507,38 @@ local_name %s {
 
                 postFixPath = '/etc/postfix/main.cf'
 
-                # Check if main.cf exists before accessing it
-                if not os.path.exists(postFixPath):
+                # Only configure Postfix TLS SNI if main.cf exists; otherwise
+                # skip this snippet but continue so the main-domain setup (block B) still runs.
+                if os.path.exists(postFixPath):
+                    postFixContent = open(postFixPath, 'r').read()
+
+                    if postFixContent.find('tls_server_sni_maps') == -1:
+                        writeToFile = open(postFixPath, 'a')
+                        writeToFile.write('\ntls_server_sni_maps = hash:/etc/postfix/vmail_ssl.map\n')
+                        writeToFile.close()
+
+                    postfixMapFile = '/etc/postfix/vmail_ssl.map'
+                    try:
+                        postfixMapFileContent = open(postfixMapFile, 'r').read()
+                    except:
+                        postfixMapFileContent = ''
+
+                    if postfixMapFileContent.find('/live/%s/' % (childDomain)) == -1:
+                        mapContent = f'%s /etc/letsencrypt/live/%s/privkey.pem /etc/letsencrypt/live/%s/fullchain.pem\n{virtualHostName} /etc/letsencrypt/live/{virtualHostName}/privkey.pem /etc/letsencrypt/live/{virtualHostName}/fullchain.pem\n' % (
+                            childDomain, childDomain, childDomain)
+
+                        writeToFile = open(postfixMapFile, 'a')
+                        writeToFile.write(mapContent)
+                        writeToFile.close()
+
+                    command = 'postmap -F hash:/etc/postfix/vmail_ssl.map'
+
+                    ProcessUtilities.executioner(command)
+
+                    command = 'systemctl restart postfix'
+                    ProcessUtilities.executioner(command)
+                else:
                     logging.CyberCPLogFileWriter.writeToFile(f"setupAutoDiscover: {postFixPath} not found, skipping postfix TLS SNI configuration")
-                    return
-
-                postFixContent = open(postFixPath, 'r').read()
-
-                if postFixContent.find('tls_server_sni_maps') == -1:
-                    writeToFile = open(postFixPath, 'a')
-                    writeToFile.write('\ntls_server_sni_maps = hash:/etc/postfix/vmail_ssl.map\n')
-                    writeToFile.close()
-
-                postfixMapFile = '/etc/postfix/vmail_ssl.map'
-                try:
-                    postfixMapFileContent = open(postfixMapFile, 'r').read()
-                except:
-                    postfixMapFileContent = ''
-
-                if postfixMapFileContent.find('/live/%s/' % (childDomain)) == -1:
-                    mapContent = f'%s /etc/letsencrypt/live/%s/privkey.pem /etc/letsencrypt/live/%s/fullchain.pem\n{virtualHostName} /etc/letsencrypt/live/{virtualHostName}/privkey.pem /etc/letsencrypt/live/{virtualHostName}/fullchain.pem\n' % (
-                        childDomain, childDomain, childDomain)
-
-                    writeToFile = open(postfixMapFile, 'a')
-                    writeToFile.write(mapContent)
-                    writeToFile.close()
-
-                command = 'postmap -F hash:/etc/postfix/vmail_ssl.map'
-
-                ProcessUtilities.executioner(command)
-
-                command = 'systemctl restart postfix'
-                ProcessUtilities.executioner(command)
 
         ### even if mail domain creation is not set, we will have to set up auto discover for main domain
 
@@ -566,31 +566,35 @@ local_name %s {
 
             postFixPath = '/etc/postfix/main.cf'
 
-            postFixContent = open(postFixPath, 'r').read()
+            # Only configure Postfix TLS SNI if main.cf exists; otherwise skip this snippet.
+            if os.path.exists(postFixPath):
+                postFixContent = open(postFixPath, 'r').read()
 
-            if postFixContent.find('tls_server_sni_maps') == -1:
-                writeToFile = open(postFixPath, 'a')
-                writeToFile.write('\ntls_server_sni_maps = hash:/etc/postfix/vmail_ssl.map\n')
-                writeToFile.close()
+                if postFixContent.find('tls_server_sni_maps') == -1:
+                    writeToFile = open(postFixPath, 'a')
+                    writeToFile.write('\ntls_server_sni_maps = hash:/etc/postfix/vmail_ssl.map\n')
+                    writeToFile.close()
 
-            postfixMapFile = '/etc/postfix/vmail_ssl.map'
-            try:
-                postfixMapFileContent = open(postfixMapFile, 'r').read()
-            except:
-                postfixMapFileContent = ''
+                postfixMapFile = '/etc/postfix/vmail_ssl.map'
+                try:
+                    postfixMapFileContent = open(postfixMapFile, 'r').read()
+                except:
+                    postfixMapFileContent = ''
 
-            if postfixMapFileContent.find('/live/%s/' % (virtualHostName)) == -1:
-                mapContent = f'{virtualHostName} /etc/letsencrypt/live/{virtualHostName}/privkey.pem /etc/letsencrypt/live/{virtualHostName}/fullchain.pem\n'
-                writeToFile = open(postfixMapFile, 'a')
-                writeToFile.write(mapContent)
-                writeToFile.close()
+                if postfixMapFileContent.find('/live/%s/' % (virtualHostName)) == -1:
+                    mapContent = f'{virtualHostName} /etc/letsencrypt/live/{virtualHostName}/privkey.pem /etc/letsencrypt/live/{virtualHostName}/fullchain.pem\n'
+                    writeToFile = open(postfixMapFile, 'a')
+                    writeToFile.write(mapContent)
+                    writeToFile.close()
 
-            command = 'postmap -F hash:/etc/postfix/vmail_ssl.map'
+                command = 'postmap -F hash:/etc/postfix/vmail_ssl.map'
 
-            ProcessUtilities.executioner(command)
+                ProcessUtilities.executioner(command)
 
-            command = 'systemctl restart postfix'
-            ProcessUtilities.executioner(command)
+                command = 'systemctl restart postfix'
+                ProcessUtilities.executioner(command)
+            else:
+                logging.CyberCPLogFileWriter.writeToFile(f"setupAutoDiscover: {postFixPath} not found, skipping postfix TLS SNI configuration")
 
     @staticmethod
     def createVirtualHost(virtualHostName, administratorEmail, phpVersion, virtualHostUser, ssl,
