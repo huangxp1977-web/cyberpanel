@@ -14,6 +14,7 @@ import json
 from .models import Package
 from plogical.acl import ACLManager
 from plogical.processUtilities import ProcessUtilities
+from plogical import filesystemQuota, storageQuota
 
 class PackagesManager:
     def __init__(self, request = None):
@@ -357,7 +358,44 @@ class PackagesManager:
                     except:
                         pass  # Keep existing value
 
+                quota_plan = None
+                storage_plans = []
+                if modifyPack.enforceDiskLimits:
+                    try:
+                        modifyPack.diskSpace = filesystemQuota.limit(data['diskSpace'])
+                        modifyPack.inodeLimit = filesystemQuota.limit(data.get('inodeLimit', modifyPack.inodeLimit))
+                        quota_plan = filesystemQuota.prepare_package_quota(modifyPack)
+                    except Exception as error:
+                        return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                            'error_message': 'No package settings were changed. ' + str(error)}))
+
+                try:
+                    for website in modifyPack.websites_set.all():
+                        plan = storageQuota.prepare_policy(
+                            website, modifyPack.diskSpace, modifyPack.inodeLimit,
+                            enforce=bool(modifyPack.enforceDiskLimits))
+                        if plan is not None:
+                            storage_plans.append((website.domain, plan))
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'No package settings were changed. ' + str(error)}))
+
                 modifyPack.save()
+
+                if quota_plan is not None:
+                    try:
+                        filesystemQuota.apply_quota_plan(quota_plan)
+                    except Exception as error:
+                        return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                            'error_message': 'Package settings were saved, but disk/inode quotas were not fully applied. ' + str(error)}))
+
+                for domain, plan in storage_plans:
+                    try:
+                        storageQuota.apply_policy(plan)
+                    except Exception as error:
+                        return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                            'error_message': 'Package settings were saved, but combined website/mail quotas were not fully applied. '
+                                             + domain + ': ' + str(error)}))
 
                 ## Fix https://github.com/usmannasir/cyberpanel/issues/998
 

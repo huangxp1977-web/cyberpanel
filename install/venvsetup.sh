@@ -86,8 +86,6 @@ if [[ $SERVER_COUNTRY == "CN" ]] ; then
 #sed -i "${line2}i\ \ \ \ \ \ \ \ command = 'wget cyberpanel.sh/cyberpanel-git.tar.gz'" install.py
 sed -i 's|wget https://rpms.litespeedtech.com/debian/|wget --no-check-certificate https://rpms.litespeedtech.com/debian/|g' install.py
 sed -i 's|https://repo.powerdns.com/repo-files/centos-auth-42.repo|https://'$DOWNLOAD_SERVER'/powerdns/powerdns.repo|g' installCyberPanel.py
-sed -i 's|https://snappymail.eu/repository/latest.tar.gz|https://'$DOWNLOAD_SERVER'/repository/latest.tar.gz|g' install.py
-
 sed -i 's|rpm -ivh https://rpms.litespeedtech.com/centos/litespeed-repo-1.1-1.el7.noarch.rpm|curl -o /etc/yum.repos.d/litespeed.repo https://'$DOWNLOAD_SERVER'/litespeed/litespeed.repo|g' install.py
 
 
@@ -384,7 +382,7 @@ if [[ $SERVER_OS == "CentOS" ]] ; then
 fi
 if [[ $SERVER_OS == "Ubuntu" ]] ; then
 	DEBIAN_FRONTEND=noninteractive apt install -y lsphp73-memcached lsphp72-memcached lsphp71-memcached lsphp70-memcached
-		if [[ $TOTAL_RAM -eq "2048" ]] || [[ $TOTAL_RAM -gt "2048" ]] ; then
+		if { [[ $TOTAL_RAM -eq "2048" ]] || [[ $TOTAL_RAM -gt "2048" ]]; } && apt-cache policy libpcre3-dev 2>/dev/null | grep -q 'Candidate: [^(]' ; then
 			DEBIAN_FRONTEND=noninteractive apt install build-essential zlib1g-dev libexpat1-dev openssl libssl-dev libsasl2-dev libpcre3-dev git -y
 			wget https://$DOWNLOAD/litespeed/lsmcd.tar.gz
 			tar xzvf lsmcd.tar.gz
@@ -480,13 +478,13 @@ if  echo $OUTPUT | grep -q "CentOS Linux 7" ; then
 elif echo $OUTPUT | grep -q "CloudLinux 7" ; then
 	echo -e "\nDetecting CloudLinux 7.X...\n"
 	SERVER_OS="CentOS"
-elif echo $OUTPUT | grep -q "Ubuntu 18.04" ; then
-	echo -e "\nDetecting Ubuntu 18.04...\n"
+elif echo "$OUTPUT" | grep -q -E "Ubuntu (18.04|20.04|22.04|24.04|26.04)" ; then
+	echo -e "\nDetecting Ubuntu...\n"
 	SERVER_OS="Ubuntu"
 else
 	cat /etc/*release
 	echo -e "\nUnable to detect your OS...\n"
-	echo -e "\nCyberPanel is supported on Ubuntu 18.04, CentOS 7.x and CloudLinux 7.x...\n"
+	echo -e "\nCyberPanel is supported on Ubuntu 18.04, Ubuntu 20.04, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, CentOS 7.x and CloudLinux 7.x...\n"
 	exit 1
 fi
 }
@@ -909,12 +907,12 @@ if [[ $DEV == "ON" ]] ; then
 	#install dev branch 
 	#wget https://raw.githubusercontent.com/usmannasir/cyberpanel/$BRANCH_NAME/requirments.txt
 	cd /usr/local/
-	python3.6 -m venv CyberPanel
+	python3 -m venv --system-site-packages CyberPanel
 	source /usr/local/CyberPanel/bin/activate
 	wget -O requirements.txt https://raw.githubusercontent.com/usmannasir/cyberpanel/$BRANCH_NAME/requirments.txt
-	pip3.6 install --ignore-installed -r requirements.txt
+	python -m pip install --ignore-installed -r requirements.txt
 	# Install python-dotenv for loading .env file (critical for AlmaLinux 8)
-	pip3.6 install python-dotenv
+	python -m pip install python-dotenv
 fi
 
 if [ -f requirements.txt ] && [ -d cyberpanel ] ; then
@@ -965,12 +963,12 @@ fi
 if grep "CyberPanel installation successfully completed" /var/log/installLogs.txt > /dev/null; then
 
 if [[ $DEV == "ON" ]] ; then
-python3.6 -m venv /usr/local/CyberCP
+python3 -m venv --system-site-packages /usr/local/CyberCP
 source /usr/local/CyberCP/bin/activate
 wget -O requirements.txt https://raw.githubusercontent.com/usmannasir/cyberpanel/$BRANCH_NAME/requirments.txt
-pip3.6 install --ignore-installed -r requirements.txt
+python -m pip install --ignore-installed -r requirements.txt
 # Install python-dotenv for loading .env file (critical for AlmaLinux 8)
-pip3.6 install python-dotenv
+python -m pip install python-dotenv
 systemctl restart lscpd
 fi
 

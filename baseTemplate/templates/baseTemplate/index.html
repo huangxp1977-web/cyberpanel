@@ -1,6 +1,6 @@
 {% load i18n %}
 {% get_current_language as LANGUAGE_CODE %}
-{% with CP_VERSION=CYBERPANEL_FULL_VERSION|default:"2.4.8" %}
+{% with CP_VERSION=CYBERPANEL_FULL_VERSION|default:"3.0.3" %}
 <!DOCTYPE html>
 <html lang="en" ng-app="CyberCP">
 <head>
@@ -29,6 +29,7 @@
     </style>
     
     <!-- Core Scripts -->
+    <style id="cp-ng-cloak-guard">[ng-cloak],[data-ng-cloak],.ng-cloak{display:none !important;}</style>
     <script src="{% static 'baseTemplate/angularjs.1.6.5.js' %}?v={{ CP_VERSION }}"></script>
     <script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
     <!-- Bootstrap JavaScript -->
@@ -199,8 +200,8 @@
                 <div class="info-line">
                     <strong>Uptime:</strong>
                     <span aria-live="polite">
-                        <span ng-show="!uptimeLoaded">{% trans "Loading..." %}</span>
-                        <span ng-show="uptimeLoaded">{$ uptime $}</span>
+                        <span ng-cloak ng-show="!uptimeLoaded">{% trans "Loading..." %}</span>
+                        <span ng-cloak ng-show="uptimeLoaded">{$ uptime $}</span>
                     </span>
                 </div>
             </div>
@@ -388,7 +389,7 @@
             {l:'{% trans "ModSecurity" %}', h:'{% url "modSecurity" %}', i:'fa-shield-halved', g:'{% trans "Security" %}'},
             {l:'{% trans "ModSecurity Rules" %}', h:'{% url "modSecRules" %}', i:'fa-list', g:'{% trans "Security" %}'},
             {l:'{% trans "Imunify 360" %}', h:'{% url "imunify" %}', i:'fa-shield-virus', g:'{% trans "Security" %}'},
-            {l:'{% trans "Manage SSL" %}', h:'{% url "v2ManageSSL" %}', i:'fa-lock', g:'{% trans "Security" %}'},
+            {l:'{% trans "Manage SSL" %}', h:'{% url "manageSSL" %}', i:'fa-lock', g:'{% trans "Security" %}'},
             {l:'{% trans "Hostname SSL" %}', h:'{% url "sslForHostName" %}', i:'fa-server', g:'{% trans "Security" %}'},
             // Settings (admin)
             {l:'{% trans "Version Management" %}', h:'{% url "versionManagment" %}', i:'fa-code-branch', g:'{% trans "Settings" %}'},
@@ -508,13 +509,13 @@
     <script defer src="{% static 'userManagment/userManagment.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'databases/databases.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'dns/dns.js' %}?v={{ CP_VERSION }}"></script>
-    <script defer src="{% static 'mailServer/mailServer.js' %}?v={{ CP_VERSION }}"></script>
+    <script defer src="{% static 'mailServer/mailServer.js' %}?v={{ CP_VERSION }}-2"></script>
     <script defer src="{% static 'ftp/ftp.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'backup/backup.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'managePHP/managePHP.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'serverLogs/serverLogs.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'serverStatus/serverStatus.js' %}?v={{ CP_VERSION }}"></script>
-    <script defer src="{% static 'firewall/firewall.js' %}?v={{ CP_VERSION }}"></script>
+    <script defer src="{% static 'firewall/firewall.js' %}?v={{ CP_VERSION }}-2"></script>
     <script defer src="{% static 'emailPremium/emailPremium.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'manageServices/manageServices.js' %}?v={{ CP_VERSION }}"></script>
     <script defer src="{% static 'CLManager/CLManager.js' %}?v={{ CP_VERSION }}"></script>

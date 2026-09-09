@@ -1,11 +1,11 @@
 #!/usr/local/CyberCP/bin/python
 import os,sys
 import random
-import string
 
 from ApachController.ApacheVhosts import ApacheVhost
 from manageServices.models import PDNSStatus
 from .processUtilities import ProcessUtilities
+from .legacyWebmail import legacy_data_permission_commands
 
 sys.path.append('/usr/local/CyberCP')
 import django
@@ -53,6 +53,15 @@ class ACLManager:
               '"hostnameSSL": 0, "mailServerSSL": 0 }'
 
     @staticmethod
+    def isAdminACL(acl):
+        if int(getattr(acl, 'adminStatus', 0) or 0) == 1:
+            return True
+        try:
+            return int(json.loads(acl.config).get('adminStatus', 0) or 0) == 1
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    @staticmethod
     def VerifySMTPHost(currentACL, owner, user):
         if currentACL['admin'] == 1:
             return 1
@@ -73,7 +82,30 @@ class ACLManager:
 
     @staticmethod
     def AliasDomainCheck(currentACL, aliasDomain, master):
-        aliasOBJ = aliasDomains.objects.get(aliasDomain=aliasDomain)
+        # Both callers (issueAliasSSL / delateAlias) verify checkOwnership(master)
+        # before calling this, so the master domain is already known to belong to
+        # the user. Handle the orphaned-alias case (present in the server config
+        # but missing its aliasDomains row) gracefully instead of raising an
+        # uncaught DoesNotExist that surfaces as a 500 and blocks self-repair. #1738
+        try:
+            # NOTE: look up unscoped so an alias that belongs to a DIFFERENT
+            # master is still found here and correctly rejected below (return 0)
+            # for non-admins — scoping this query to `master` would hide it and
+            # wrongly fall into the orphan branch.
+            aliasOBJ = aliasDomains.objects.get(aliasDomain=aliasDomain)
+        except aliasDomains.DoesNotExist:
+            # Truly orphaned: the alias exists in the server config but has no
+            # aliasDomains row at all. Ownership of the master is already enforced
+            # by the caller, so allow the operation to proceed and self-heal
+            # (delete / re-issue SSL) rather than raising a 500. #1738
+            return 1
+        except aliasDomains.MultipleObjectsReturned:
+            # Duplicate rows for the same alias name: keep the one under this
+            # master if present, otherwise it belongs only to other masters.
+            aliasOBJ = aliasDomains.objects.filter(aliasDomain=aliasDomain, master__domain=master).first()
+            if aliasOBJ is None:
+                return 0
+
         masterOBJ = Websites.objects.get(domain=master)
         if currentACL['admin'] == 1:
             return 1
@@ -127,6 +159,12 @@ class ACLManager:
             return ipData.split('\n', 1)[0]
         except BaseException:
             return "192.168.100.1"
+
+    ## GitHub and GitLab allow dots in a repository name (repo.ltd), the default
+    ## validateInput pattern does not, so attaching such a repo failed the security
+    ## check. Dots are allowed between segments only, never leading and never doubled,
+    ## so the name can still not walk a path.
+    RepoNameRegex = compile(r'[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*')
 
     @staticmethod
     def validateInput(value, regex = None):
@@ -461,7 +499,7 @@ class ACLManager:
 
     @staticmethod
     def websitesLimitCheck(currentAdmin, websitesLimit, userToBeModified = None):
-        if currentAdmin.acl.adminStatus != 1:
+        if not ACLManager.isAdminACL(currentAdmin.acl):
 
             if currentAdmin.initWebsitesLimit != 0:
                 webLimits = 0
@@ -577,6 +615,13 @@ class ACLManager:
             php = "83"
         elif phpVersion == "PHP 8.4":
             php = "84"
+        elif phpVersion == "PHP 8.5":
+            php = "85"
+        else:
+            # Future-proof: derive the string from the version so a newly
+            # released PHP (8.6, 9.0, ...) never raises UnboundLocalError on
+            # pages like the subdomain list. (#1726)
+            php = phpVersion.replace("PHP", "").replace(".", "").strip()
 
         return php
 
@@ -1188,34 +1233,6 @@ class ACLManager:
     def fixPermissions():
         try:
 
-            try:
-                def generate_pass(length=14):
-                    import secrets
-                    chars = string.ascii_uppercase + string.ascii_lowercase + string.digits
-                    size = length
-                    return ''.join(secrets.choice(chars) for x in range(size))
-
-                content = """<?php
-$_ENV['snappymail_INCLUDE_AS_API'] = true;
-include '/usr/local/CyberCP/public/snappymail/index.php';
-
-$oConfig = \snappymail\Api::Config();
-$oConfig->SetPassword('%s');
-echo $oConfig->Save() ? 'Done' : 'Error';
-
-?>""" % (generate_pass())
-
-                writeToFile = open('/usr/local/CyberCP/public/snappymail.php', 'w')
-                writeToFile.write(content)
-                writeToFile.close()
-
-                command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/data"
-                ProcessUtilities.executioner(command, 'root', True)
-
-            except:
-                pass
-
-
             command = "usermod -G lscpd,lsadm,nobody lscpd"
             ProcessUtilities.executioner(command, 'root', True)
 
@@ -1237,6 +1254,13 @@ echo $oConfig->Save() ? 'Done' : 'Error';
 
             command = "chown -R root:root /usr/local/CyberCP"
             ProcessUtilities.executioner(command, 'root', True)
+
+            terminalSecretPath = '/usr/local/CyberCP/terminal_jwt_secret'
+            if os.path.exists(terminalSecretPath):
+                command = "chown cyberpanel:cyberpanel %s" % terminalSecretPath
+                ProcessUtilities.executioner(command, 'root', True)
+                command = "chmod 600 %s" % terminalSecretPath
+                ProcessUtilities.executioner(command, 'root', True)
 
             ########### Fix LSCPD
 
@@ -1260,8 +1284,8 @@ echo $oConfig->Save() ? 'Done' : 'Error';
             command = "chown -R root:root /usr/local/lscp"
             ProcessUtilities.executioner(command, 'root', True)
 
-            command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop"
-            ProcessUtilities.executioner(command, 'root', True)
+            for command in legacy_data_permission_commands():
+                ProcessUtilities.executioner(command, 'root', True)
 
             command = "chmod 700 /usr/local/CyberCP/cli/cyberPanel.py"
             ProcessUtilities.executioner(command, 'root', True)
@@ -1375,12 +1399,6 @@ echo $oConfig->Save() ? 'Done' : 'Error';
             command = 'chmod 640 /usr/local/lscp/cyberpanel/logs/access.log'
             ProcessUtilities.executioner(command, 'root', True)
 
-            command = '/usr/local/lsws/lsphp83/bin/php /usr/local/CyberCP/public/snappymail.php'
-            ProcessUtilities.executioner(command, 'root', True)
-
-            command = 'chmod 600 /usr/local/CyberCP/public/snappymail.php'
-            ProcessUtilities.executioner(command, 'root', True)
-
             ###
 
             WriteToFile = open('/etc/fstab', 'a')
@@ -1428,7 +1446,3 @@ echo $oConfig->Save() ? 'Done' : 'Error';
 
         except BaseException as msg:
             logging.writeToFile(str(msg) + " [fixPermissions]")
-
-
-
-

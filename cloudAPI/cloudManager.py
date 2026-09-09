@@ -24,7 +24,14 @@ from serverStatus.views import topProcessesStatus, killProcess, switchTOLSWSStat
 from plogical import hashPassword
 from loginSystem.models import ACL
 from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter as logging
-from plogical.securityUtils import api_token_matches
+from plogical.securityUtils import (
+    EMAIL_REPORT_DIRECTORY,
+    api_token_matches,
+    api_two_factor_matches,
+    create_private_token_file,
+    read_private_token_file,
+    remove_stale_private_token_files,
+)
 from managePHP.phpManager import PHPManager
 from managePHP.views import submitExtensionRequest, getRequestStatusApache
 from containerization.views import *
@@ -45,7 +52,8 @@ class CloudManager:
 
     def verifyLogin(self, request):
         try:
-            if api_token_matches(request.META.get('HTTP_AUTHORIZATION'), self.admin.token):
+            if (api_token_matches(request.META.get('HTTP_AUTHORIZATION'), self.admin.token)
+                    and api_two_factor_matches(self.admin, request, self.data)):
                 return 1, self.ajaxPre(1, None)
             else:
                 return 0, self.ajaxPre(0, 'Invalid login information.')
@@ -1472,14 +1480,15 @@ class CloudManager:
         try:
 
             tempStatusPath = "/home/cyberpanel/" + str(randint(1000, 9999))
-            reportFile = "/home/cyberpanel/" + str(randint(1000, 9999))
+            remove_stale_private_token_files(EMAIL_REPORT_DIRECTORY, 86400)
+            reportToken, reportFile = create_private_token_file(EMAIL_REPORT_DIRECTORY)
 
             extraArgs = {'tempStatusPath': tempStatusPath, 'reportFile': reportFile}
 
             background = MailServerManager(None, 'RunServerLevelEmailChecks', extraArgs)
             background.start()
 
-            final_dic = {'status': 1, 'tempStatusPath': tempStatusPath, 'reportFile': reportFile}
+            final_dic = {'status': 1, 'tempStatusPath': tempStatusPath, 'reportFile': reportToken}
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
@@ -1488,15 +1497,21 @@ class CloudManager:
 
     def ReadReport(self):
         try:
-            reportFile = self.data['reportFile']
-            reportContent = open(reportFile, 'r').read()
+            reportToken = self.data['reportFile']
+            reportContent = read_private_token_file(
+                reportToken,
+                EMAIL_REPORT_DIRECTORY,
+                consume=True,
+                max_age=3600,
+            )
 
             data_ret = {'status': 1, 'reportContent': reportContent}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
         except BaseException as msg:
-            data_ret = {'status': 0, 'abort': 0, 'installationProgress': "0", 'errorMessage': str(msg)}
+            data_ret = {'status': 0, 'abort': 0, 'installationProgress': "0",
+                        'errorMessage': 'Invalid or unavailable report.'}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -2673,6 +2688,10 @@ class CloudManager:
 
     def SubmitCyberPanelUpgrade(self):
         try:
+            if os.path.lexists('/etc/csf'):
+                from cyberpanel_firewall_migration import CSF_UPGRADE_MESSAGE
+                return self.ajaxPre(0, CSF_UPGRADE_MESSAGE)
+
             try:
                 mail = str(int(self.data['mail']))
             except:

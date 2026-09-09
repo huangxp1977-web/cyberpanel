@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 import time
+import os
+import shlex
+import stat
+import tempfile
 from random import randint
 
 from django.shortcuts import redirect, HttpResponse
+from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from cloudAPI.cloudManager import CloudManager
@@ -19,6 +24,9 @@ from plogical import randomPassword
 from cryptography.fernet import Fernet
 from plogical.mysqlUtilities import mysqlUtilities
 from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter as logging
+from plogical.securityUtils import get_mysql_upgrade_status_path
+from django.views.decorators.http import require_POST
+from databases.phpmyadmin_handoff import consume_handoff, create_handoff
 
 
 # Create your views here.
@@ -255,6 +263,22 @@ def generateAccess(request):
 
 
 @csrf_exempt
+@require_POST
+def consumePHPMYAdminHandoff(request):
+    try:
+        request.session['userID']
+    except KeyError:
+        return JsonResponse({'status': 0}, status=403)
+
+    username = request.POST.get('username', '')
+    token = request.POST.get('token', '')
+    if not consume_handoff(request.session, username, token):
+        return JsonResponse({'status': 0}, status=403)
+
+    return JsonResponse({'status': 1})
+
+
+@csrf_exempt
 def fetchDetailsPHPMYAdmin(request):
     try:
 
@@ -294,6 +318,8 @@ def fetchDetailsPHPMYAdmin(request):
                     data = {}
                     data['userName'] = mysqluser
                     data['password'] = password
+                    data['token'] = token
+                    create_handoff(request.session, mysqluser, token)
 
                     proc = httpProc(request, 'databases/AutoLogin.html',
                                     data, 'admin')
@@ -309,6 +335,8 @@ def fetchDetailsPHPMYAdmin(request):
                     data = {}
                     data['userName'] = 'root'
                     data['password'] = password
+                    data['token'] = token
+                    create_handoff(request.session, 'root', token)
                     # return redirect(returnURL)
 
                     proc = httpProc(request, 'databases/AutoLogin.html',
@@ -333,6 +361,8 @@ def fetchDetailsPHPMYAdmin(request):
             data = {}
             data['userName'] = admin.userName
             data['password'] = password.decode()
+            data['token'] = token
+            create_handoff(request.session, admin.userName, token)
             # return redirect(returnURL)
 
             proc = httpProc(request, 'databases/AutoLogin.html',
@@ -472,6 +502,10 @@ def applyMySQLChanges(request):
         return redirect(loadLoginPage)
 
 
+SUPPORTED_MARIADB_UPGRADE_VERSIONS = frozenset(('10.6', '10.11'))
+
+
+@require_POST
 def upgrademysqlnow(request):
     try:
         from plogical.virtualHostUtilities import virtualHostUtilities
@@ -485,12 +519,30 @@ def upgrademysqlnow(request):
             return ACLManager.loadErrorJson('FilemanagerAdmin', 0)
 
         data = json.loads(request.body)
-        version =data['mysqlversion']
-        tempStatusPath = "/home/cyberpanel/" + str(randint(1000, 9999))
+        version = str(data['mysqlversion'])
+        if version not in SUPPORTED_MARIADB_UPGRADE_VERSIONS:
+            return HttpResponse(json.dumps({
+                'status': 0,
+                'error_message': 'Unsupported MariaDB upgrade version.',
+            }))
 
+        with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                prefix='mysql-upgrade-',
+                dir='/home/cyberpanel',
+                delete=False) as status_file:
+            status_file.write('Starting\n')
+            tempStatusPath = status_file.name
+        os.chmod(tempStatusPath, 0o600)
 
-
-        execPath = f"/usr/local/CyberCP/bin/python /usr/local/CyberCP/plogical/mysqlUtilities.py UpgradeMariaDB --version {version} --tempStatusPath {tempStatusPath}"
+        execPath = shlex.join([
+            '/usr/local/CyberCP/bin/python',
+            '/usr/local/CyberCP/plogical/mysqlUtilities.py',
+            'UpgradeMariaDB',
+            '--version', version,
+            '--tempStatusPath', tempStatusPath,
+        ])
         ProcessUtilities.popenExecutioner(execPath)
         time.sleep(2)
 
@@ -502,6 +554,7 @@ def upgrademysqlnow(request):
         return redirect(loadLoginPage)
 
 
+@require_POST
 def upgrademysqlstatus(request):
     try:
 
@@ -515,13 +568,37 @@ def upgrademysqlstatus(request):
             return ACLManager.loadErrorJson('FilemanagerAdmin', 0)
 
         data = json.loads(request.body)
-        statusfile = data['statusfile']
-        installStatus = ProcessUtilities.outputExecutioner("sudo cat " + statusfile)
+        statusfile = get_mysql_upgrade_status_path(data.get('statusfile'))
+        if not statusfile:
+            return HttpResponse(json.dumps({
+                'status': 0,
+                'error_message': 'Invalid MariaDB upgrade status file.',
+            }))
+
+        descriptor = os.open(
+            statusfile,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            file_status = os.fstat(descriptor)
+            if (not stat.S_ISREG(file_status.st_mode)
+                    or file_status.st_nlink != 1
+                    or stat.S_IMODE(file_status.st_mode) & 0o077):
+                raise OSError('Unsafe MariaDB upgrade status file.')
+            with os.fdopen(descriptor, 'r', encoding='utf-8', errors='replace') as status_stream:
+                descriptor = None
+                installStatus = status_stream.read(262145)
+            if len(installStatus) > 262144:
+                raise OSError('MariaDB upgrade status file is too large.')
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
         if installStatus.find("[200]") > -1:
-
-            command = 'sudo rm -f ' + statusfile
-            ProcessUtilities.executioner(command)
+            current_status = os.lstat(statusfile)
+            if (current_status.st_dev == file_status.st_dev
+                    and current_status.st_ino == file_status.st_ino):
+                os.unlink(statusfile)
 
             final_json = json.dumps({
                 'error_message': "None",
@@ -531,8 +608,10 @@ def upgrademysqlstatus(request):
             })
             return HttpResponse(final_json)
         elif installStatus.find("[404]") > -1:
-            command = 'sudo rm -f ' + statusfile
-            ProcessUtilities.executioner(command)
+            current_status = os.lstat(statusfile)
+            if (current_status.st_dev == file_status.st_dev
+                    and current_status.st_ino == file_status.st_ino):
+                os.unlink(statusfile)
             final_json = json.dumps({
                 'abort': 1,
                 'installed': 0,
@@ -550,3 +629,8 @@ def upgrademysqlstatus(request):
             return HttpResponse(final_json)
     except KeyError:
         return redirect(loadLoginPage)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return HttpResponse(json.dumps({
+            'status': 0,
+            'error_message': 'Unable to read the MariaDB upgrade status.',
+        }))

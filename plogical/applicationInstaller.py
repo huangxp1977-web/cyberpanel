@@ -27,6 +27,12 @@ from plogical.mysqlUtilities import mysqlUtilities
 from databases.models import Databases
 from plogical.installUtilities import installUtilities
 from plogical.processUtilities import ProcessUtilities
+from plogical.wordpressInstallerUtilities import (
+    build_directory_probe,
+    build_wordpress_core_install_command,
+    directory_allows_install,
+    wordpress_php_change_required,
+)
 from random import randint
 import hashlib
 
@@ -157,6 +163,29 @@ class ApplicationInstaller(multi.Thread):
             ProcessUtilities.executioner(command, 'root', True)
 
         return 1
+
+    @staticmethod
+    def registerWordPressSite(owner, title, path, final_url):
+        """Register an installed site in WordPress Manager without duplicates."""
+        wordpress_site = WPSites.objects.filter(
+            owner=owner,
+            path=path,
+        ).first()
+        if wordpress_site is None:
+            return WPSites.objects.create(
+                owner=owner,
+                title=title,
+                path=path,
+                FinalURL=final_url,
+                AutoUpdates='Disabled',
+                PluginUpdates='Disabled',
+                ThemeUpdates='Disabled',
+            )
+
+        wordpress_site.title = title
+        wordpress_site.FinalURL = final_url
+        wordpress_site.save(update_fields=['title', 'FinalURL'])
+        return wordpress_site
 
 
     def installMautic(self):
@@ -536,21 +565,27 @@ class ApplicationInstaller(multi.Thread):
 
     def dataLossCheck(self, finalPath, tempStatusPath, user=None):
 
-        if user == None:
-            dirFiles = os.listdir(finalPath)
-
-            if len(dirFiles) <= 3:
-                return 1
-            else:
+        if user is None:
+            try:
+                return 1 if len(os.listdir(finalPath)) <= 3 else 0
+            except BaseException as msg:
+                logging.writeToFile(
+                    str(msg) + ' [ApplicationInstaller.dataLossCheck]'
+                )
                 return 0
-        else:
-            command = 'ls %s | wc -l' % (finalPath)
-            result = ProcessUtilities.outputExecutioner(command, user, True).rstrip('\n')
 
-            if int(result) <= 3:
-                return 1
-            else:
-                return 0
+        command = build_directory_probe(finalPath)
+        success, result = ProcessUtilities.outputExecutioner(
+            command, user, True, None, True
+        )
+        if directory_allows_install(success, result):
+            return 1
+
+        logging.writeToFile(
+            'Unable to confirm an empty install directory for %s '
+            '[ApplicationInstaller.dataLossCheck]' % finalPath
+        )
+        return 0
 
     def installGit(self):
         try:
@@ -653,9 +688,22 @@ class ApplicationInstaller(multi.Thread):
 
             completePathToConfigFile = f'/usr/local/lsws/conf/vhosts/{domainName}/vhost.conf'
 
-            execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
-            execPath = execPath + " changePHP --phpVersion 'PHP 8.3' --path " + completePathToConfigFile
-            ProcessUtilities.executioner(execPath)
+            from plogical.phpUtilities import phpUtilities
+
+            try:
+                phpPath = phpUtilities.GetPHPVersionFromFile(completePathToConfigFile)
+            except:
+                phpPath = '/usr/local/lsws/lsphp83/bin/php'
+
+            requiredPHPPath = '/usr/local/lsws/lsphp83/bin/php'
+            if wordpress_php_change_required(phpPath, requiredPHPPath):
+                execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
+                execPath = execPath + " changePHP --phpVersion 'PHP 8.3' --path " + completePathToConfigFile
+                ProcessUtilities.executioner(execPath)
+                try:
+                    phpPath = phpUtilities.GetPHPVersionFromFile(completePathToConfigFile)
+                except:
+                    phpPath = requiredPHPPath
 
             ### lets first find php path
 
@@ -666,16 +714,6 @@ class ApplicationInstaller(multi.Thread):
 
             command = "sed -i.bak 's/^memory_limit = .*/memory_limit = 256M/' /usr/local/lsws/lsphp83/etc/php.ini"
             ProcessUtilities.executioner(command)
-
-            from plogical.phpUtilities import phpUtilities
-
-            vhFile = f'/usr/local/lsws/conf/vhosts/{domainName}/vhost.conf'
-
-            try:
-                phpPath = phpUtilities.GetPHPVersionFromFile(vhFile)
-            except:
-                phpPath = '/usr/local/lsws/lsphp83/bin/php'
-
 
             ### basically for now php 8.3 is being checked
 
@@ -779,11 +817,9 @@ class ApplicationInstaller(multi.Thread):
             statusFile.writelines('Downloading WordPress Core,30')
             statusFile.close()
 
-            try:
-                command = f"{FinalPHPPath} -d error_reporting=0 /usr/bin/wp core download --allow-root --path={finalPath} --version={self.extraArgs['WPVersion']}"
-            except:
-                # Fallback to using explicit PHP 8.3 path even in exception
-                command = f"/usr/local/lsws/lsphp83/bin/php -d error_reporting=0 /usr/bin/wp core download --allow-root --path={finalPath}"
+            command = build_wordpress_core_install_command(
+                self.extraArgs['WPVersion'], finalPath, FinalPHPPath
+            )
 
             result = ProcessUtilities.outputExecutioner(command, externalApp)
 
@@ -958,6 +994,14 @@ class ApplicationInstaller(multi.Thread):
                 pass
 
             ##
+
+            webobj = Websites.objects.get(domain=self.masterDomain)
+            self.registerWordPressSite(
+                webobj,
+                blogTitle,
+                finalPath,
+                finalURL,
+            )
 
             statusFile = open(tempStatusPath, 'w')
             statusFile.writelines("Successfully Installed. [200]")
@@ -2041,10 +2085,16 @@ class ApplicationInstaller(multi.Thread):
                 finalPath = "/home/" + self.extraArgs['domainName'] + "/public_html/"
                 Finalurl = (self.extraArgs['domainName'])
 
-            wpobj = WPSites(owner=webobj, title=self.extraArgs['blogTitle'], path=finalPath, FinalURL=Finalurl,
-                            AutoUpdates=(self.extraArgs['updates']), PluginUpdates=(self.extraArgs['Plugins']),
-                            ThemeUpdates=(self.extraArgs['Themes']), )
-            wpobj.save()
+            # installWordPress() has already registered this path, so reuse that
+            # row and apply the update policies chosen here rather than inserting
+            # a second one for the same site.
+            wpobj = ApplicationInstaller.registerWordPressSite(
+                webobj, self.extraArgs['blogTitle'], finalPath, Finalurl,
+            )
+            wpobj.AutoUpdates = self.extraArgs['updates']
+            wpobj.PluginUpdates = self.extraArgs['Plugins']
+            wpobj.ThemeUpdates = self.extraArgs['Themes']
+            wpobj.save(update_fields=['AutoUpdates', 'PluginUpdates', 'ThemeUpdates'])
 
             statusFile = open(currentTemp, 'w')
             statusFile.writelines('WordPress installed..,[200]')

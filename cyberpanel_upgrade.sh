@@ -4,7 +4,7 @@
 #set -x
 #set -u
 
-#CyberPanel installer script for CentOS 7, CentOS 8, CloudLinux 7, AlmaLinux 8, AlmaLinux 9, AlmaLinux 10, RockyLinux 8, Ubuntu 18.04, Ubuntu 20.04, Ubuntu 20.10, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 24.04.3, openEuler 20.03 and openEuler 22.03
+#CyberPanel installer script for CentOS 7, CentOS 8, CloudLinux 7, AlmaLinux 8, AlmaLinux 9, AlmaLinux 10, RockyLinux 8, Ubuntu 18.04, Ubuntu 20.04, Ubuntu 20.10, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 24.04.3, Ubuntu 26.04, openEuler 20.03 and openEuler 22.03
 #For whoever may edit this script, please follow:
 #Please use Pre_Install_xxx() and Post_Install_xxx() if you want to something respectively before or after the panel installation
 #and update below accordingly
@@ -14,7 +14,22 @@
 Sudo_Test=$(set)
 #for SUDO check
 
+# Automated root sessions such as console and guest-agent runs may not provide
+# HOME. Git and Composer both require the root home during an upgrade.
+export HOME=/root
+
+Check_CSF_Migration() {
+  if [[ -e /etc/csf || -L /etc/csf ]]; then
+    echo "Upgrade stopped: CSF files were detected. Complete a reviewed manual firewall migration, verify replacement rules and SSH/panel access, then retry. CSF and its panel integration have not been removed." >&2
+    exit 1
+  fi
+}
+
 Set_Default_Variables() {
+
+# Set to 1 when upgrade.py fails, so the final banner reports the failure instead
+# of claiming success just because the panel still answers on its port.
+UPGRADE_FAILED=0
 
 # Clear old log files
 echo -e "Clearing old log files..."
@@ -28,22 +43,6 @@ echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Starting CyberPanel Upgrade Script" >> /
 echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Old log files have been cleared" >> /var/log/cyberpanel_upgrade_debug.log
 echo -e "========================================\n" >> /var/log/cyberpanel_upgrade_debug.log
 
-#### this is temp code for csf
-
-rm -Rfv /usr/local/CyberCP/configservercsf
-rm -fv /home/cyberpanel/plugins/configservercsf
-rm -Rfv /usr/local/CyberCP/public/static/configservercsf
-
-sed -i "/configservercsf/d" /usr/local/CyberCP/CyberCP/settings.py
-sed -i "/configservercsf/d" /usr/local/CyberCP/CyberCP/urls.py
-if [ ! -e /etc/cxs/cxs.pl ]; then
-    sed -i "/configserver/d" /usr/local/CyberCP/baseTemplate/templates/baseTemplate/index.html
-fi
-#systemctl restart lscpd
-### this is temp code for csf
-
-
-
 export LC_CTYPE=en_US.UTF-8
 echo -e "\nFetching latest data from CyberPanel server...\n"
 echo -e "This may take few seconds..."
@@ -53,9 +52,19 @@ Server_OS=""
 Server_OS_Version=""
 Server_Provider='Undefined'
 
+parse_panel_version() {
+  local version_data="$1"
+  Panel_Version=$(printf '%s' "$version_data" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p')
+  Panel_Build=$(printf '%s' "$version_data" | sed -n 's/.*"build"[[:space:]]*:[[:space:]]*"\{0,1\}\([0-9][0-9]*\)"\{0,1\}.*/\1/p')
+  [[ "$Panel_Version" =~ ^[0-9]+\.[0-9]+$ && "$Panel_Build" =~ ^[0-9]+$ ]]
+}
+
 Temp_Value=$(curl --silent --max-time 30 -4 https://cyberpanel.net/version.txt)
-Panel_Version=${Temp_Value:12:3}
-Panel_Build=${Temp_Value:25:1}
+if ! parse_panel_version "$Temp_Value"; then
+  echo -e "\nUnable to fetch a valid CyberPanel version."
+  echo -e "\nPlease try again in a few moments."
+  exit 1
+fi
 
 Branch_Name="v${Panel_Version}.${Panel_Build}"
 Base_Number="1.9.3"
@@ -151,14 +160,14 @@ elif grep -q -E "Rocky Linux" /etc/os-release ; then
   Server_OS="RockyLinux"
 elif grep -q -E "AlmaLinux-8|AlmaLinux-9|AlmaLinux-10" /etc/os-release ; then
   Server_OS="AlmaLinux"
-elif grep -q -E "Ubuntu 18.04|Ubuntu 20.04|Ubuntu 20.10|Ubuntu 22.04|Ubuntu 24.04" /etc/os-release ; then
+elif grep -q -E "Ubuntu 18.04|Ubuntu 20.04|Ubuntu 20.10|Ubuntu 22.04|Ubuntu 24.04|Ubuntu 26.04" /etc/os-release ; then
   Server_OS="Ubuntu"
 elif grep -q -E "openEuler 20.03|openEuler 22.03" /etc/os-release ; then
   Server_OS="openEuler"
 else
   echo -e "Unable to detect your system..."
-  echo -e "\nCyberPanel is supported on x86_64 based Ubuntu 18.04, Ubuntu 20.04, Ubuntu 20.10, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 24.04.3, CentOS 7, CentOS 8, AlmaLinux 8, AlmaLinux 9, AlmaLinux 10, RockyLinux 8, CloudLinux 7, CloudLinux 8, CloudLinux 9, openEuler 20.03, openEuler 22.03...\n"
-  Debug_Log2 "CyberPanel is supported on x86_64 based Ubuntu 18.04, Ubuntu 20.04, Ubuntu 20.10, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 24.04.3, CentOS 7, CentOS 8, AlmaLinux 8, AlmaLinux 9, AlmaLinux 10, RockyLinux 8, CloudLinux 7, CloudLinux 8, CloudLinux 9, openEuler 20.03, openEuler 22.03... [404]"
+  echo -e "\nCyberPanel is supported on x86_64 based Ubuntu 18.04, Ubuntu 20.04, Ubuntu 20.10, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 24.04.3, Ubuntu 26.04, CentOS 7, CentOS 8, AlmaLinux 8, AlmaLinux 9, AlmaLinux 10, RockyLinux 8, CloudLinux 7, CloudLinux 8, CloudLinux 9, openEuler 20.03, openEuler 22.03...\n"
+  Debug_Log2 "CyberPanel is supported on x86_64 based Ubuntu 18.04, Ubuntu 20.04, Ubuntu 20.10, Ubuntu 22.04, Ubuntu 24.04, Ubuntu 24.04.3, Ubuntu 26.04, CentOS 7, CentOS 8, AlmaLinux 8, AlmaLinux 9, AlmaLinux 10, RockyLinux 8, CloudLinux 7, CloudLinux 8, CloudLinux 9, openEuler 20.03, openEuler 22.03... [404]"
   exit
 fi
 
@@ -166,6 +175,34 @@ Server_OS_Version=$(grep VERSION_ID /etc/os-release | awk -F[=,] '{print $2}' | 
 #to make 20.04 display as 20, etc.
 
 echo -e "System: $Server_OS $Server_OS_Version detected...\n"
+
+# Interpreter the CyberPanel/CyberCP virtualenvs are built on.
+#
+# Ubuntu 26.04 ships Python 3.14, which Django 4.2.14 does not support (4.2 tops out
+# at 3.12). Build the venvs on the deadsnakes 3.12 instead and leave the system
+# python3.14 alone for Ubuntu's own tooling. Every other OS keeps /usr/bin/python3.
+CyberPanel_Python="/usr/bin/python3"
+
+if [[ "$Server_OS" = "Ubuntu" ]] && [[ "$Server_OS_Version" = "26" ]] ; then
+  if [[ ! -x /usr/bin/python3.12 ]] ; then
+    echo -e "Ubuntu 26.04 detected - installing Python 3.12 for the CyberPanel virtualenv..."
+    # This runs before the main apt update, so refresh the lists first or
+    # software-properties-common can fail to resolve on a stale index.
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
+    add-apt-repository -y ppa:deadsnakes/ppa
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3.12 python3.12-venv python3.12-dev
+  fi
+  if [[ -x /usr/bin/python3.12 ]] ; then
+    CyberPanel_Python="/usr/bin/python3.12"
+  else
+    echo -e "\nERROR: Python 3.12 is required on Ubuntu 26.04 but could not be installed."
+    echo -e "CyberPanel cannot run on the system Python 3.14 with Django 4.2.\n"
+    Debug_Log2 "Python 3.12 install failed on Ubuntu 26.04 [404]"
+    exit 1
+  fi
+fi
 
 if [[ $Server_OS = "CloudLinux" ]] || [[ "$Server_OS" = "AlmaLinux" ]] || [[ "$Server_OS" = "RockyLinux" ]] || [[ "$Server_OS" = "RedHat" ]]; then
   Server_OS="CentOS"
@@ -492,13 +529,9 @@ elif [[ "$Server_OS" = "Ubuntu" ]] ; then
   apt update -y
   export DEBIAN_FRONTEND=noninteractive ; apt-get -o Dpkg::Options::="--force-confold" upgrade -y
 
-  if [[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] ; then
-    if [[ "$Server_OS_Version" = "24" ]]; then
-      echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Installing Ubuntu 24.04 specific packages..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-    else
-      echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Installing Ubuntu 22.04 specific packages..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-    fi
-    # Install Python development packages required for virtualenv on Ubuntu 22.04/24.04
+  if [[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]] ; then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Installing Ubuntu ${Server_OS_Version}.04 specific packages..." | tee -a /var/log/cyberpanel_upgrade_debug.log
+    # Install Python development packages required for virtualenv on Ubuntu 22.04/24.04/26.04
     DEBIAN_FRONTEND=noninteractive apt install -y python3-dev python3-venv python3-pip python3-setuptools python3-wheel
     DEBIAN_FRONTEND=noninteractive apt install -y dnsutils net-tools htop telnet libcurl4-gnutls-dev libgnutls28-dev libgcrypt20-dev libattr1 libattr1-dev liblzma-dev libgpgme-dev libcurl4-gnutls-dev libssl-dev nghttp2 libnghttp2-dev idn2 libidn2-dev libidn2-0-dev librtmp-dev libpsl-dev nettle-dev libgnutls28-dev libldap2-dev libgssapi-krb5-2 libk5crypto3 libkrb5-dev libcomerr2 libldap2-dev virtualenv git socat vim unzip zip libmariadb-dev-compat libmariadb-dev
 
@@ -512,9 +545,9 @@ elif [[ "$Server_OS" = "Ubuntu" ]] ; then
   ### fix for pip issue on ubuntu 22 and 24
 
   apt-get remove --purge virtualenv -y
-  # Handle Ubuntu 24.04's externally-managed-environment policy
-  if [[ "$Server_OS_Version" = "24" ]]; then
-    echo -e "Ubuntu 24.04 detected - using apt for virtualenv installation"
+  # Handle the externally-managed-environment policy (PEP 668) on Ubuntu 24.04+
+  if [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]]; then
+    echo -e "Ubuntu ${Server_OS_Version}.04 detected - using apt for virtualenv installation"
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-virtualenv
   else
     pip uninstall -y virtualenv 2>/dev/null || true
@@ -562,7 +595,7 @@ Download_Requirement() {
 echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Starting Download_Requirement function..." | tee -a /var/log/cyberpanel_upgrade_debug.log
 for i in {1..50};
   do
-  if [[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "9" ]] || [[ "$Server_OS_Version" = "10" ]]; then
+  if [[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]] || [[ "$Server_OS_Version" = "9" ]] || [[ "$Server_OS_Version" = "10" ]]; then
    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Downloading requirements.txt for OS version $Server_OS_Version" | tee -a /var/log/cyberpanel_upgrade_debug.log
    wget -O /usr/local/requirments.txt "${Git_Content_URL}/${Branch_Name}/requirments.txt" 2>&1 | tee -a /var/log/cyberpanel_upgrade_debug.log
   else
@@ -579,6 +612,30 @@ for i in {1..50};
   fi
 done
 #special made function for Gitee.com, for whatever reason sometimes it fails to download this file
+}
+
+Validate_Python_Requirements() {
+  local runtime_python="$1"
+  local requirements_file="$2"
+  local expected_django
+  local actual_django
+
+  expected_django=$(sed -n 's/^Django==\([^[:space:]]*\).*$/\1/p' "$requirements_file" | head -n 1)
+  if [[ -z "$expected_django" ]]; then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] ERROR: No pinned Django version found in $requirements_file" | tee -a /var/log/cyberpanel_upgrade_debug.log
+    return 1
+  fi
+
+  actual_django=$(
+    "$runtime_python" -c 'import django; print(django.get_version())' 2>/dev/null
+  )
+  if [[ "$actual_django" != "$expected_django" ]]; then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] ERROR: $runtime_python loaded Django ${actual_django:-unavailable}; expected $expected_django" | tee -a /var/log/cyberpanel_upgrade_debug.log
+    return 1
+  fi
+
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Verified Django $actual_django in $runtime_python" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  return 0
 }
 
 # lswsgi/lscpd loads Django with PYTHONHOME=/usr on several OS versions. Packages installed only into
@@ -680,6 +737,23 @@ Install_CyberCP_Runtime_Python_Requirements() {
   fi
 }
 
+Configure_LSCPD_Python_Environment() {
+  local environment_file="${LSCPD_PYTHON_ENV_FILE:-/usr/local/lscp/conf/pythonenv.conf}"
+  local runtime_root="${CYBERCP_RUNTIME_ROOT:-/usr/local/CyberCP}"
+  local runtime_site=""
+
+  if [[ "${Server_OS:-}" = "Ubuntu" ]] && [[ "${Server_OS_Version:-}" = "24" ]] \
+    && [[ -x "$runtime_root/bin/python" ]]; then
+    runtime_site="$("$runtime_root/bin/python" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)"
+    if [[ "$runtime_site" = "$runtime_root"/lib/python*/site-packages ]] && [[ -d "$runtime_site" ]]; then
+      printf 'PYTHONHOME=/usr\nPYTHONPATH=.:%s:%s\n' "$runtime_root" "$runtime_site" > "$environment_file"
+      return 0
+    fi
+  fi
+
+  printf 'PYTHONHOME=/usr\n' > "$environment_file"
+}
+
 
 
 Pre_Upgrade_Required_Components() {
@@ -688,11 +762,15 @@ Pre_Upgrade_Required_Components() {
 echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Checking CyberCP directory integrity..." | tee -a /var/log/cyberpanel_upgrade_debug.log
 
 # Define essential CyberCP components
+# NOTE: only list directories that actually exist in the repo. There is no
+# top-level "manage" directory (the real ones are managePHP/manageSSL/
+# manageServices and the manage.py file), so listing it flagged every healthy
+# install as damaged and triggered an unnecessary — sometimes destructive —
+# recovery re-clone (#1720).
 CYBERCP_ESSENTIAL_DIRS=(
     "/usr/local/CyberCP/CyberCP"
     "/usr/local/CyberCP/plogical"
     "/usr/local/CyberCP/websiteFunctions"
-    "/usr/local/CyberCP/manage"
 )
 
 CYBERCP_MISSING=0
@@ -762,10 +840,10 @@ if [ "$Server_OS" = "Ubuntu" ]; then
   rm -rf /usr/local/CyberPanel
   
   # For Ubuntu 22.04 and 24.04, handle virtualenv installation properly
-  if [[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]]; then
-    if [[ "$Server_OS_Version" = "24" ]]; then
-      echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu 24.04: Using apt for virtualenv installation (externally-managed-environment policy)..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-      # Ubuntu 24.04 has externally-managed-environment, use apt
+  if [[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]]; then
+    if [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]]; then
+      echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu ${Server_OS_Version}.04: Using apt for virtualenv installation (externally-managed-environment policy)..." | tee -a /var/log/cyberpanel_upgrade_debug.log
+      # Ubuntu 24.04+ has externally-managed-environment, use apt
       DEBIAN_FRONTEND=noninteractive apt-get install -y python3-virtualenv python3-venv
     else
       echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu 22.04: Installing/upgrading virtualenv with proper dependencies..." | tee -a /var/log/cyberpanel_upgrade_debug.log
@@ -792,12 +870,12 @@ fi
 if [[ -f /usr/local/CyberPanel/bin/python2 ]]; then
   echo -e "\nPython 2 dectected, doing re-setup...\n"
   rm -rf /usr/local/CyberPanel/bin
-  if [[ "$Server_OS" = "Ubuntu" ]] && ([[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]]); then
-    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu $Server_OS_Version detected, using python3 -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-    python3 -m venv /usr/local/CyberPanel
+  if [[ "$Server_OS" = "Ubuntu" ]] && ([[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]]); then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu $Server_OS_Version detected, using $CyberPanel_Python -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
+    "$CyberPanel_Python" -m venv /usr/local/CyberPanel
   elif [[ "$Server_OS" = "CentOS" ]] && ([[ "$Server_OS_Version" = "9" ]] || [[ "$Server_OS_Version" = "10" ]]); then
     PYTHON_PATH=$(which python3 2>/dev/null || which python3.9 2>/dev/null || echo "/usr/bin/python3")
-    virtualenv -p "$PYTHON_PATH" --system-site-packages /usr/local/CyberPanel
+    virtualenv -p "$PYTHON_PATH" /usr/local/CyberPanel
   else
     virtualenv -p /usr/bin/python3 --system-site-packages /usr/local/CyberPanel
   fi
@@ -810,12 +888,12 @@ else
 echo -e "\nNothing found, need fresh setup...\n"
 
 # Attempt to create a virtual environment
-if [[ "$Server_OS" = "Ubuntu" ]] && ([[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]]); then
-  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu $Server_OS_Version detected, using python3 -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-  python3 -m venv /usr/local/CyberPanel
+if [[ "$Server_OS" = "Ubuntu" ]] && ([[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]]); then
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu $Server_OS_Version detected, using $CyberPanel_Python -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
+  "$CyberPanel_Python" -m venv /usr/local/CyberPanel
 elif [[ "$Server_OS" = "CentOS" ]] && ([[ "$Server_OS_Version" = "9" ]] || [[ "$Server_OS_Version" = "10" ]]); then
   PYTHON_PATH=$(which python3 2>/dev/null || which python3.9 2>/dev/null || echo "/usr/bin/python3")
-  virtualenv -p "$PYTHON_PATH" --system-site-packages /usr/local/CyberPanel
+  virtualenv -p "$PYTHON_PATH" /usr/local/CyberPanel
 else
   virtualenv -p /usr/bin/python3 --system-site-packages /usr/local/CyberPanel
 fi
@@ -845,12 +923,12 @@ if [ $? -ne 0 ]; then
                 # Verify the installation
                 if [ $? -eq 0 ]; then
                     echo "'packaging' module reinstalled and upgraded successfully."
-                    if [[ "$Server_OS" = "Ubuntu" ]] && ([[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]]); then
-                        echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu $Server_OS_Version detected, using python3 -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-                        python3 -m venv /usr/local/CyberPanel
+                    if [[ "$Server_OS" = "Ubuntu" ]] && ([[ "$Server_OS_Version" = "22" ]] || [[ "$Server_OS_Version" = "24" ]] || [[ "$Server_OS_Version" = "26" ]]); then
+                        echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Ubuntu $Server_OS_Version detected, using $CyberPanel_Python -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
+                        "$CyberPanel_Python" -m venv /usr/local/CyberPanel
                     elif [[ "$Server_OS" = "CentOS" ]] && ([[ "$Server_OS_Version" = "9" ]] || [[ "$Server_OS_Version" = "10" ]]); then
                         PYTHON_PATH=$(which python3 2>/dev/null || which python3.9 2>/dev/null || echo "/usr/bin/python3")
-                        virtualenv -p "$PYTHON_PATH" --system-site-packages /usr/local/CyberPanel
+                        virtualenv -p "$PYTHON_PATH" /usr/local/CyberPanel
                     else
                         virtualenv -p /usr/bin/python3 --system-site-packages /usr/local/CyberPanel
                     fi
@@ -873,34 +951,54 @@ fi
 
 # shellcheck disable=SC1091
 . /usr/local/CyberPanel/bin/activate
-pip install --upgrade setuptools packaging
+if ! /usr/local/CyberPanel/bin/python -m pip install --upgrade setuptools packaging; then
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] FATAL: Unable to prepare the CyberPanel upgrade environment" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  exit 1
+fi
 
 Download_Requirement
 
-if [[ "$Server_OS" = "CentOS" ]] ; then
-#  $PIP3 install --default-timeout=3600 virtualenv==16.7.9
-#    Check_Return
-  $PIP3 install --default-timeout=3600 --ignore-installed -r /usr/local/requirments.txt
-    Check_Return
-elif [[ "$Server_OS" = "Ubuntu" ]] ; then
-  # shellcheck disable=SC1091
-  . /usr/local/CyberPanel/bin/activate
-    Check_Return
-#  pip3 install --default-timeout=3600 virtualenv==16.7.9
-#    Check_Return
-  pip3 install --default-timeout=3600 --ignore-installed -r /usr/local/requirments.txt
-    Check_Return
-elif [[ "$Server_OS" = "openEuler" ]] ; then
-#  pip3 install --default-timeout=3600 virtualenv==16.7.9
-#    Check_Return
-  pip3 install --default-timeout=3600 --ignore-installed -r /usr/local/requirments.txt
-    Check_Return
+if ! /usr/local/CyberPanel/bin/python -m pip install --default-timeout=3600 --ignore-installed -r /usr/local/requirments.txt; then
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] FATAL: Unable to install CyberPanel upgrade requirements" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  exit 1
+fi
+
+if ! Validate_Python_Requirements /usr/local/CyberPanel/bin/python /usr/local/requirments.txt; then
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] FATAL: CyberPanel upgrade environment failed validation" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  exit 1
 fi
 
 #virtualenv -p /usr/bin/python3 --system-site-packages /usr/local/CyberPanel
 #  Check_Return
 
-wget "${Git_Content_URL}/${Branch_Name}/plogical/upgrade.py"
+# raw.githubusercontent.com intermittently answers HTTP 429; running an error
+# page through Python later fails in confusing ways, so validate every staged
+# source file before use.
+Download_Upgrade_Source() {
+  local Source_Path="$1"
+  local Destination="$2"
+  local Expected_Pattern="$3"
+
+  for i in {1..3}; do
+    rm -f "$Destination"
+    wget -q -O "$Destination" "${Git_Content_URL}/${Branch_Name}/${Source_Path}"
+    if grep -q -- "$Expected_Pattern" "$Destination" 2>/dev/null ; then
+      return 0
+    fi
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] ${Destination} download failed or returned invalid content (attempt $i/3), GitHub may be rate limiting (HTTP 429). Retrying in 15 seconds..." | tee -a /var/log/cyberpanel_upgrade_debug.log
+    sleep 15
+  done
+
+  echo -e "\nFailed to download ${Destination} from ${Git_Content_URL}/${Branch_Name}/${Source_Path}"
+  echo -e "This is usually a temporary GitHub rate limit (HTTP 429 Too Many Requests). Please retry the upgrade later.\n"
+  return 1
+}
+
+Download_Upgrade_Source "plogical/upgrade.py" "upgrade.py" "^import " || exit 1
+Download_Upgrade_Source "cyberpanel_version.py" "cyberpanel_version.py" "^VERSION" || exit 1
+if grep -q '^from cyberpanel_firewall_migration import ' upgrade.py; then
+  Download_Upgrade_Source "cyberpanel_firewall_migration.py" "cyberpanel_firewall_migration.py" "^CSF_UPGRADE_MESSAGE" || exit 1
+fi
 
 if [[ "$Server_Country" = "CN" ]] ; then
   sed -i 's|git clone https://github.com/usmannasir/cyberpanel|echo git cloned|g' upgrade.py
@@ -973,51 +1071,41 @@ else
     echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] First upgrade attempt failed with code $RETURN_CODE, starting fallback..." | tee -a /var/log/cyberpanel_upgrade_debug.log
 
 
-    if [ -e /usr/bin/pip3 ]; then
-    PIP3="/usr/bin/pip3"
-  else
-    PIP3="pip3.6"
-  fi
-
   rm -rf /usr/local/CyberPanelTemp
   
   echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Creating temporary virtual environment for fallback upgrade..." | tee -a /var/log/cyberpanel_upgrade_debug.log
   
-  # Try python3 -m venv first (more reliable on Ubuntu 22.04)
-  if python3 -m venv --system-site-packages /usr/local/CyberPanelTemp 2>/dev/null; then
-    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Temporary virtualenv created with python3 -m venv" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  # Keep fallback dependencies isolated from incompatible system Python packages.
+  if "$CyberPanel_Python" -m venv /usr/local/CyberPanelTemp 2>/dev/null; then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Temporary virtualenv created with $CyberPanel_Python -m venv" | tee -a /var/log/cyberpanel_upgrade_debug.log
   else
     # Fallback to virtualenv command
     echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Trying virtualenv command for temporary environment..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-    virtualenv -p /usr/bin/python3 --system-site-packages /usr/local/CyberPanelTemp 2>&1 | tee -a /var/log/cyberpanel_upgrade_debug.log
+    virtualenv -p "$CyberPanel_Python" /usr/local/CyberPanelTemp 2>&1 | tee -a /var/log/cyberpanel_upgrade_debug.log
   fi
 
-# shellcheck disable=SC1091
-. /usr/local/CyberPanelTemp/bin/activate
+FALLBACK_CODE=1
+if [[ ! -x /usr/local/CyberPanelTemp/bin/python ]]; then
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] ERROR: Unable to create the isolated fallback environment" | tee -a /var/log/cyberpanel_upgrade_debug.log
+else
+  Download_Requirement
 
-wget -O /usr/local/requirments-old.txt "${Git_Content_URL}/${Branch_Name}/requirments-old.txt"
-
-    if [[ "$Server_OS" = "CentOS" ]] ; then
-#  $PIP3 install --default-timeout=3600 virtualenv==16.7.9
-#    Check_Return
-  $PIP3 install --default-timeout=3600 --ignore-installed -r /usr/local/requirments-old.txt
-    Check_Return
-elif [[ "$Server_OS" = "Ubuntu" ]] ; then
-  # shellcheck disable=SC1091
-  . /usr/local/CyberPanelTemp/bin/activate
-    Check_Return
-  pip3 install --default-timeout=3600 --ignore-installed -r /usr/local/requirments-old.txt
-    Check_Return
-elif [[ "$Server_OS" = "openEuler" ]] ; then
-  pip3 install --default-timeout=3600 --ignore-installed -r /usr/local/requirments-old.txt
-    Check_Return
+  if /usr/local/CyberPanelTemp/bin/python -m pip install --default-timeout=3600 --ignore-installed -r /usr/local/requirments.txt \
+      && Validate_Python_Requirements /usr/local/CyberPanelTemp/bin/python /usr/local/requirments.txt; then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Running fallback: /usr/local/CyberPanelTemp/bin/python upgrade.py $Branch_Name" | tee -a /var/log/cyberpanel_upgrade_debug.log
+    /usr/local/CyberPanelTemp/bin/python upgrade.py "$Branch_Name" 2>&1 | tee -a /var/log/cyberpanel_upgrade_debug.log
+    # upgrade.py is piped into tee, so read its status from PIPESTATUS.
+    FALLBACK_CODE=${PIPESTATUS[0]}
+  else
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] ERROR: Fallback requirements could not be installed and validated" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  fi
 fi
 
-echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Running fallback: /usr/local/CyberPanelTemp/bin/python upgrade.py $Branch_Name" | tee -a /var/log/cyberpanel_upgrade_debug.log
-/usr/local/CyberPanelTemp/bin/python upgrade.py "$Branch_Name" 2>&1 | tee -a /var/log/cyberpanel_upgrade_debug.log
-FALLBACK_CODE=$?
 echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Fallback upgrade returned code: $FALLBACK_CODE" | tee -a /var/log/cyberpanel_upgrade_debug.log
-Check_Return
+if [ "$FALLBACK_CODE" -ne 0 ]; then
+  UPGRADE_FAILED=1
+  echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] ERROR: Fallback upgrade.py also failed with code $FALLBACK_CODE" | tee -a /var/log/cyberpanel_upgrade_debug.log
+fi
 
 echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Removing temporary environment..." | tee -a /var/log/cyberpanel_upgrade_debug.log
 rm -rf /usr/local/CyberPanelTemp
@@ -1053,7 +1141,7 @@ if [[ $NEEDS_RECREATE -eq 1 ]] || [[ ! -d /usr/local/CyberCP/bin ]]; then
   
   # First try using python3 -m venv (more reliable on Ubuntu 22.04)
   echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Attempting to create virtual environment using python3 -m venv..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-  virtualenv_output=$(python3 -m venv --system-site-packages /usr/local/CyberCP 2>&1)
+  virtualenv_output=$("$CyberPanel_Python" -m venv --system-site-packages /usr/local/CyberCP 2>&1)
   VENV_CODE=$?
   echo "$virtualenv_output" | tee -a /var/log/cyberpanel_upgrade_debug.log
   
@@ -1079,7 +1167,7 @@ if [[ $NEEDS_RECREATE -eq 1 ]] || [[ ! -d /usr/local/CyberCP/bin ]]; then
       echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Using Python path: $PYTHON_PATH" | tee -a /var/log/cyberpanel_upgrade_debug.log
       virtualenv_output=$(virtualenv -p "$PYTHON_PATH" /usr/local/CyberCP 2>&1)
     else
-      virtualenv_output=$(virtualenv -p /usr/bin/python3 /usr/local/CyberCP 2>&1)
+      virtualenv_output=$(virtualenv -p "$CyberPanel_Python" /usr/local/CyberCP 2>&1)
     fi
     VENV_CODE=$?
     echo "$virtualenv_output" | tee -a /var/log/cyberpanel_upgrade_debug.log
@@ -1243,8 +1331,9 @@ Post_Upgrade_System_Tweak() {
 
   if [[ "$Server_OS" = "Ubuntu" ]] ; then
 
-  if ! dpkg -l lsphp74-dev >/dev/null 2>&1 ; then
-    apt install -y lsphp74-dev
+  if apt-cache show lsphp74-dev >/dev/null 2>&1 \
+     && ! dpkg-query -W -f='${db:Status-Status}' lsphp74-dev 2>/dev/null | grep -qx installed ; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y lsphp74-dev
   fi
 
     if [[ ! -f /usr/sbin/ipset ]] ; then
@@ -1273,8 +1362,18 @@ fi
 sed -i 's|python2|python|g' /usr/bin/adminPass
 chmod 700 /usr/bin/adminPass
 
+# Point /usr/bin/php at an lsphp that is actually installed, preferring the
+# default CLI version (8.3, matching upgrade.py/install.py) and falling back to
+# whatever is present. This block runs after upgrade.py and previously hardcoded
+# lsphp74 unconditionally, so on servers without PHP 7.4 it replaced a working
+# symlink with a broken one and `php -v` failed with "command not found". (#1727)
 rm -f /usr/bin/php
-ln -s /usr/local/lsws/lsphp74/bin/php /usr/bin/php
+for _php_ver in 83 84 85 82 81 80 74; do
+  if [ -x "/usr/local/lsws/lsphp${_php_ver}/bin/php" ]; then
+    ln -s "/usr/local/lsws/lsphp${_php_ver}/bin/php" /usr/bin/php
+    break
+  fi
+done
 
 if [[ -f /etc/cyberpanel/webadmin_passwd ]]; then
   chmod 600 /etc/cyberpanel/webadmin_passwd
@@ -1450,7 +1549,7 @@ else
 fi
 
 if [[ "$Server_OS_Version" = "9" ]] || [[ "$Server_OS_Version" = "10" ]] || [[ "$Server_OS_Version" = "18" ]] || [[ "$Server_OS_Version" = "8" ]] || [[ "$Server_OS_Version" = "20" ]] || [[ "$Server_OS_Version" = "24" ]]; then
-    echo "PYTHONHOME=/usr" > /usr/local/lscp/conf/pythonenv.conf
+    Configure_LSCPD_Python_Environment
     Install_CyberCP_Runtime_Python_Requirements "/etc/cyberpanel/cyberpanel-requirments-runtime.txt"
   else
     # Uncomment and use the following lines if necessary for other OS versions
@@ -1467,34 +1566,19 @@ if [[ -f /usr/local/lscp/conf/pythonenv.conf ]] && grep -q '^PYTHONHOME=/usr' /u
   fi
 fi
 
-# Fix SnappyMail directory permissions for Ubuntu 24.04 and other systems
-echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Checking SnappyMail directories..." | tee -a /var/log/cyberpanel_upgrade_debug.log
-
-# Create SnappyMail data directories if they don't exist
-mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/configs/
-mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/domains/
-mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/storage/
-mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/temp/
-mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/cache/
-
-# Ensure proper ownership for SnappyMail data directories
+# Keep private data from retired webmail clients protected when an older server
+# still has it. Do not create or configure those paths on current installs.
 if id -u lscpd >/dev/null 2>&1; then
-    chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/
-    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Set SnappyMail ownership to lscpd:lscpd" | tee -a /var/log/cyberpanel_upgrade_debug.log
-else
-    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] WARNING: lscpd user not found, skipping ownership change" | tee -a /var/log/cyberpanel_upgrade_debug.log
+    for legacy_data_path in \
+        /usr/local/lscp/cyberpanel/snappymail/data \
+        /usr/local/lscp/cyberpanel/rainloop/data; do
+        if [[ -d "$legacy_data_path" ]]; then
+            chown -R lscpd:lscpd "$legacy_data_path"
+            find "$legacy_data_path" -type d -exec chmod 700 {} \;
+            find "$legacy_data_path" -type f -exec chmod 600 {} \;
+        fi
+    done
 fi
-
-# Set proper permissions for SnappyMail data directories (group writable)
-chmod -R 775 /usr/local/lscp/cyberpanel/snappymail/data/
-echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Set SnappyMail data directory permissions to 775 (group writable)" | tee -a /var/log/cyberpanel_upgrade_debug.log
-
-# Ensure web server users are in the lscpd group for access
-usermod -a -G lscpd nobody 2>/dev/null || true
-
-# Fix SnappyMail public directory ownership (critical fix)
-chown -R lscpd:lscpd /usr/local/CyberCP/public/snappymail/data 2>/dev/null || true
-echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Added web server users to lscpd group and fixed SnappyMail ownership" | tee -a /var/log/cyberpanel_upgrade_debug.log
 
 systemctl restart lscpd
 
@@ -1508,6 +1592,20 @@ if [[ $Panel_Port = "" ]] ; then
 fi
 
 Panel_HTTP_Code=$(curl -k -L -s -o /dev/null -w "%{http_code}" "https://127.0.0.1:${Panel_Port#*:}/")
+
+# A responding panel cannot prove the upgrade completed. upgrade.py refreshes
+# source files before later migrations and service work, so a failed run can
+# leave a mixture of old and new state even though the panel is online again.
+if [[ "${UPGRADE_FAILED:-0}" -ne 0 ]] ; then
+  echo "###################################################################"
+  echo "                CyberPanel UPGRADE FAILED                          "
+  echo "###################################################################"
+  echo -e "\nupgrade.py did not complete. The panel runtime was restored, but source files or database state may be partially updated."
+  echo -e "Do not treat this run as a completed upgrade. Check /var/log/cyberpanel_upgrade_debug.log, correct the failure, then re-run the upgrade.\n"
+  rm -rf /root/cyberpanel_upgrade_tmp
+  exit 1
+fi
+
 if [[ "$Panel_HTTP_Code" =~ ^(200|302|401|403)$ ]] ; then
   echo "###################################################################"
   echo "                CyberPanel Upgraded                                "
@@ -1518,10 +1616,25 @@ fi
 rm -rf /root/cyberpanel_upgrade_tmp
 }
 
+Restart_Web_Terminal() {
+if [[ -x /usr/local/CyberCP/bin/python ]] && \
+   [[ -f /etc/systemd/system/fastapi_ssh_server.service ]]; then
+  systemctl daemon-reload
+  systemctl reset-failed fastapi_ssh_server >/dev/null 2>&1 || true
+  if systemctl restart fastapi_ssh_server; then
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] Web Terminal restarted after virtualenv rebuild" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  else
+    echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] WARNING: Web Terminal could not be restarted" | tee -a /var/log/cyberpanel_upgrade_debug.log
+  fi
+fi
+}
+
 if [[ ! -d /etc/cyberpanel ]] ; then
   echo -e "\n\nCan not detect CyberCP..."
   exit
 fi
+
+Check_CSF_Migration
 
 if [[ "$*" = *"--debug"* ]] ; then
   Debug="On"
@@ -1556,5 +1669,7 @@ Pre_Upgrade_Required_Components
 Main_Upgrade
 
 Post_Upgrade_System_Tweak
+
+Restart_Web_Terminal
 
 Post_Install_Display_Final_Info

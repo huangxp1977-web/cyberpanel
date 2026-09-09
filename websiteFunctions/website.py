@@ -6,7 +6,7 @@ import sys
 import django
 
 from databases.models import Databases
-from plogical.DockerSites import Docker_Sites
+from plogical.DockerSites import Docker_Sites, DOCKER_APPS
 from plogical.httpProc import httpProc
 
 sys.path.append('/usr/local/CyberCP')
@@ -37,6 +37,12 @@ from plogical.applicationInstaller import ApplicationInstaller
 from plogical import hashPassword, randomPassword
 from emailMarketing.emACL import emACL
 from plogical.processUtilities import ProcessUtilities
+from plogical.sshKeyUtilities import authorized_key_records
+from plogical.systemPassword import (
+    consume_system_password_request,
+    create_system_password_request,
+)
+from plogical.securityUtils import generate_api_token
 from managePHP.phpManager import PHPManager
 from ApachController.ApacheVhosts import ApacheVhost
 from plogical.vhostConfs import vhostConfs
@@ -45,6 +51,102 @@ from .StagingSetup import StagingSetup
 import validators
 from django.http import JsonResponse
 import ipaddress
+import requests
+from plogical.wordpressInstallerUtilities import select_wordpress_version
+
+
+def storage_card_context(website, now=None):
+    """Present only recent, verified website/mail statistics and quota status."""
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    try:
+        cached = json.loads(website.config)
+        if not isinstance(cached, dict):
+            cached = {}
+    except (TypeError, ValueError):
+        cached = {}
+
+    def recent(value):
+        try:
+            timestamp = datetime.fromisoformat(value)
+            if timestamp.tzinfo is None:
+                return None
+            # The installed statistics schedule runs daily. Allow a delayed run
+            # without indefinitely presenting a stopped scheduler as current.
+            if not 0 <= (now - timestamp).total_seconds() <= 36 * 60 * 60:
+                return None
+            return timestamp.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    allowance = max(0, int(website.package.diskSpace))
+    measured_at = recent(cached.get('storageUsageCheckedAt'))
+    usage = cached.get('DiskUsage')
+    available = (cached.get('storageUsageStatus') == 'available' and measured_at is not None
+                 and type(usage) is int and usage >= 0)
+    quota = cached.get('storageQuotaStatus')
+    quota_state = 'unavailable'
+    if isinstance(quota, dict) and recent(quota.get('checked_at')):
+        state = quota.get('state')
+        if state in ('unconfigured', 'pending', 'unsupported', 'unavailable'):
+            quota_state = state
+        elif state == 'active':
+            expected = {
+                'disk_space': allowance,
+                'inode_limit': int(website.package.inodeLimit),
+                'enforce': bool(website.package.enforceDiskLimits),
+            }
+            if (quota.get('enforced') is True and quota.get('policy') == expected
+                    and quota.get('scope') == 'website_and_owned_mail'
+                    and expected['enforce'] and (allowance or expected['inode_limit'])):
+                quota_state = 'active'
+            else:
+                quota_state = 'pending'
+    return {
+        'storageUsageAvailable': available,
+        'storageUsageState': 'available' if available else 'unavailable',
+        'storageUsageCheckedAt': measured_at if available else '',
+        'storageQuotaState': quota_state,
+        'diskInMB': usage if available else None,
+        'diskUsage': min(100, usage * 100 // allowance) if available and allowance else 0,
+        'diskInMBTotal': allowance,
+    }
+
+
+def get_wordpress_version(output):
+    value = str(output or '').strip()
+    if re.fullmatch(r'\d+(?:\.\d+){1,3}(?:[-+._a-zA-Z0-9]+)?', value):
+        return value
+    return 'Unavailable'
+
+
+def get_wordpress_flag(output, default=0):
+    for line in reversed(str(output or '').splitlines()):
+        value = line.strip()
+        if value in ('0', '1'):
+            return int(value)
+    return default
+
+
+def get_wordpress_maintenance_mode(output):
+    value = str(output or '').strip().lower()
+    if 'not active' in value:
+        return 0
+    return int('active' in value)
+
+
+def get_wordpress_json_list(output):
+    value = str(output or '').strip()
+    candidates = [value] + list(reversed(value.splitlines()))
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                return parsed
+        except (TypeError, ValueError):
+            continue
+    return []
 
 
 class WebsiteManager:
@@ -55,6 +157,21 @@ class WebsiteManager:
     def __init__(self, domain=None, childDomain=None):
         self.domain = domain
         self.childDomain = childDomain
+
+    @staticmethod
+    def gitCloneURL(host, username, repository):
+        if ':' in host:
+            domain, port = host.rsplit(':', 1)
+            port = int(port)
+            if port < 1 or port > 65535:
+                raise ValueError('Invalid SSH port.')
+            return 'ssh://git@%s:%d/%s/%s.git' % (
+                domain,
+                port,
+                username,
+                repository,
+            )
+        return 'git@%s:%s/%s.git' % (host, username, repository)
 
     def createWebsite(self, request=None, userID=None, data=None):
 
@@ -94,8 +211,11 @@ class WebsiteManager:
         }
 
         import requests
-        response = requests.post(url, data=json.dumps(data))
-        Status = response.json()['status']
+        try:
+            response = requests.post(url, data=json.dumps(data), timeout=10)
+            Status = response.json()['status']
+        except (requests.RequestException, ValueError, KeyError):
+            Status = 0
 
 
         if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
@@ -136,8 +256,15 @@ class WebsiteManager:
                             Data, 'createDatabase')
             return proc.render()
         else:
-            from django.shortcuts import reverse
-            return redirect(reverse('pricing'))
+            currentACL = ACLManager.loadedACL(userID)
+            websites = ACLManager.findAllSites(currentACL, userID)
+            proc = httpProc(
+                request,
+                'websiteFunctions/freeWordpressInstall.html',
+                {'websiteList': websites},
+                'createDatabase',
+            )
+            return proc.render()
 
     def ListWPSites(self, request=None, userID=None, DeleteID=None):
         import json
@@ -899,22 +1026,23 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp core version --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
                 Vhuser, FinalPHPPath, path)
             version = ProcessUtilities.outputExecutioner(command, None, True)
-            version = html.escape(version)
+            version = get_wordpress_version(version)
 
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin status litespeed-cache --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
-            lscachee = ProcessUtilities.outputExecutioner(command)
+            lscachee = str(ProcessUtilities.outputExecutioner(command) or '')
 
             # Get current theme
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp theme list --status=active --field=name --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
                 Vhuser, FinalPHPPath, path)
-            currentTheme = ProcessUtilities.outputExecutioner(command, None, True)
-            currentTheme = currentTheme.strip()
+            currentTheme = str(ProcessUtilities.outputExecutioner(command, None, True) or '').strip()
+            if not currentTheme:
+                currentTheme = 'Unavailable'
 
             # Get number of plugins
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin list --field=name --skip-plugins --skip-themes --path=%s 2>/dev/null' % (
                 Vhuser, FinalPHPPath, path)
-            plugins = ProcessUtilities.outputExecutioner(command, None, True)
+            plugins = str(ProcessUtilities.outputExecutioner(command, None, True) or '')
             pluginCount = len([p for p in plugins.split('\n') if p.strip()])
 
 
@@ -925,7 +1053,7 @@ class WebsiteManager:
 
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp config list --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
-            stdout = ProcessUtilities.outputExecutioner(command)
+            stdout = str(ProcessUtilities.outputExecutioner(command) or '')
             debugging = 0
             for items in stdout.split('\n'):
                 if items.find('WP_DEBUG	true	constant') > -1:
@@ -935,19 +1063,12 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp option get blog_public --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             stdoutput = ProcessUtilities.outputExecutioner(command)
-            searchindex = int(stdoutput.splitlines()[-1])
+            searchindex = get_wordpress_flag(stdoutput)
 
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp maintenance-mode status --skip-plugins --skip-themes --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             maintenanceMod = ProcessUtilities.outputExecutioner(command)
-
-            
-
-            result = maintenanceMod.splitlines()[-1]
-            if result.find('not active') > -1:
-                maintenanceMode = 0
-            else:
-                maintenanceMode = 1
+            maintenanceMode = get_wordpress_maintenance_mode(maintenanceMod)
 
             ##### Check passwd protection
             vhostName = wpsite.owner.domain
@@ -960,14 +1081,14 @@ class WebsiteManager:
 
             #### Check WP cron
             command = "sudo -u %s cat %s/wp-config.php" % (Vhuser, wpsite.path)
-            stdout = ProcessUtilities.outputExecutioner(command)
+            stdout = str(ProcessUtilities.outputExecutioner(command) or '')
             if stdout.find("'DISABLE_WP_CRON', 'true'") > -1:
                 wpcron = 1
             else:
                 wpcron = 0
 
             fb = {
-                'version': version.rstrip('\n'),
+                'version': version,
                 'lscache': lscache,
                 'debugging': debugging,
                 'searchIndex': searchindex,
@@ -1016,9 +1137,9 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp plugin list --skip-plugins --skip-themes --format=json --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             stdoutput = ProcessUtilities.outputExecutioner(command)
-            json_data = stdoutput.splitlines()[-1]
+            plugin_data = json.dumps(get_wordpress_json_list(stdoutput))
 
-            data_ret = {'status': 1, 'error_message': 'None', 'plugins': json_data}
+            data_ret = {'status': 1, 'error_message': 'None', 'plugins': plugin_data}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -1054,9 +1175,9 @@ class WebsiteManager:
             command = 'sudo -u %s %s -d error_reporting=0 /usr/bin/wp theme list --skip-plugins --skip-themes --format=json --path=%s' % (
                 Vhuser, FinalPHPPath, path)
             stdoutput = ProcessUtilities.outputExecutioner(command)
-            json_data = stdoutput.splitlines()[-1]
+            theme_data = json.dumps(get_wordpress_json_list(stdoutput))
 
-            data_ret = {'status': 1, 'error_message': 'None', 'themes': json_data}
+            data_ret = {'status': 1, 'error_message': 'None', 'themes': theme_data}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
 
@@ -2356,7 +2477,8 @@ Require valid-user
             if data['path'].find('..') > -1:
                 return ACLManager.loadErrorJson('createWebSiteStatus', 0)
 
-            data['openBasedir'] = 1
+            if currentACL['admin'] != 1:
+                data['openBasedir'] = 1
 
             if alias == 0:
 
@@ -2617,7 +2739,7 @@ Require valid-user
                         try:
                             x509 = OpenSSL.crypto.load_certificate(
                                 OpenSSL.crypto.FILETYPE_PEM,
-                                open(wildcard_path, 'r').read()
+                                open(wildcard_path, 'rb').read()
                             )
                             cn = None
                             for component in x509.get_subject().get_components():
@@ -2639,10 +2761,12 @@ Require valid-user
             else:
                 is_wildcard = False
             
-            # Load and analyze certificate
+            # Load and analyze certificate. Read as bytes: installed certs have been seen
+            # with binary garbage appended after a valid PEM chain, and a text-mode read
+            # raises UnicodeDecodeError which reports a working SSL as "none".
             x509 = OpenSSL.crypto.load_certificate(
                 OpenSSL.crypto.FILETYPE_PEM,
-                open(filePath, 'r').read()
+                open(filePath, 'rb').read()
             )
             
             # Get expiration date
@@ -3422,6 +3546,7 @@ context /cyberpanel_suspension_page.html {
 
     def saveWebsiteChanges(self, userID=None, data=None):
         try:
+            from plogical import filesystemQuota, storageQuota
             domain = data['domain']
             package = data['packForWeb']
             email = data['email']
@@ -3444,6 +3569,24 @@ context /cyberpanel_suspension_page.html {
             else:
                 return ACLManager.loadErrorJson('websiteDeleteStatus', 0)
 
+            modifyWeb = Websites.objects.get(domain=domain)
+            webpack = Package.objects.get(packageName=package)
+            quota_plan = None
+            if webpack.enforceDiskLimits:
+                try:
+                    quota_plan = filesystemQuota.prepare_package_quota(webpack, [modifyWeb])
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'No website settings were changed. ' + str(error)}))
+
+            try:
+                storage_plan = storageQuota.prepare_policy(
+                    modifyWeb, webpack.diskSpace, webpack.inodeLimit,
+                    enforce=bool(webpack.enforceDiskLimits))
+            except Exception as error:
+                return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                    'error_message': 'No website settings were changed. ' + str(error)}))
+
             confPath = virtualHostUtilities.Server_root + "/conf/vhosts/" + domain
             completePathToConfigFile = confPath + "/vhost.conf"
 
@@ -3455,9 +3598,6 @@ context /cyberpanel_suspension_page.html {
 
             newOwner = Administrator.objects.get(userName=newUser)
 
-            modifyWeb = Websites.objects.get(domain=domain)
-            webpack = Package.objects.get(packageName=package)
-
             modifyWeb.package = webpack
             modifyWeb.adminEmail = email
             modifyWeb.phpSelection = phpVersion
@@ -3465,11 +3605,19 @@ context /cyberpanel_suspension_page.html {
 
             modifyWeb.save()
 
-            ## Update disk quota when package changes - Fix for GitHub issue #1442
-            if webpack.enforceDiskLimits:
-                spaceString = f'{webpack.diskSpace}M {webpack.diskSpace}M'
-                command = f'setquota -u {modifyWeb.externalApp} {spaceString} 0 0 /'
-                ProcessUtilities.executioner(command)
+            if quota_plan is not None:
+                try:
+                    filesystemQuota.apply_quota_plan(quota_plan)
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'Website settings were saved, but disk/inode quotas were not fully applied. ' + str(error)}))
+
+            if storage_plan is not None:
+                try:
+                    storageQuota.apply_policy(storage_plan)
+                except Exception as error:
+                    return HttpResponse(json.dumps({'status': 0, 'saveStatus': 0,
+                        'error_message': 'Website settings were saved, but the combined website/mail quota was not applied. ' + str(error)}))
 
             ## Fix https://github.com/usmannasir/cyberpanel/issues/998
 
@@ -3533,6 +3681,7 @@ context /cyberpanel_suspension_page.html {
             Data['diskUsage'] = DiskUsagePercentage
             Data['diskInMB'] = DiskUsage
             Data['diskInMBTotal'] = website.package.diskSpace
+            Data.update(storage_card_context(website))
 
             Data['phps'] = PHPManager.findPHPVersions()
             import os
@@ -3549,7 +3698,7 @@ context /cyberpanel_suspension_page.html {
                 from datetime import datetime
                 filePath = '/etc/letsencrypt/live/%s/fullchain.pem' % (self.domain)
                 x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM,
-                                                       open(filePath, 'r').read())
+                                                       open(filePath, 'rb').read())
                 expireData = x509.get_notAfter().decode('ascii')
                 finalDate = datetime.strptime(expireData, '%Y%m%d%H%M%SZ')
 
@@ -3595,7 +3744,7 @@ context /cyberpanel_suspension_page.html {
             ssl_issue_link = '/manageSSL/sslForHostName'
             try:
                 import OpenSSL
-                with open(cert_path, 'r') as f:
+                with open(cert_path, 'rb') as f:
                     pem_data = f.read()
                 cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, pem_data)
                 # Only check the first cert in the PEM
@@ -3630,28 +3779,13 @@ context /cyberpanel_suspension_page.html {
 
             Data['accessed_via_ip'] = bool(accessed_via_ip)
 
-            #### update jwt secret if needed
-
-            import secrets
-
-            fastapi_file = '/usr/local/CyberCP/fastapi_ssh_server.py'
-            from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter
             try:
-                
-                content = ProcessUtilities.outputExecutioner(f'cat {fastapi_file}')
-                if 'REPLACE_ME_WITH_INSTALLER' in content:
-                    new_secret = secrets.token_urlsafe(32)
-                    
-                    sed_cmd = f"sed -i 's|JWT_SECRET = \"REPLACE_ME_WITH_INSTALLER\"|JWT_SECRET = \"{new_secret}\"|' '{fastapi_file}'"
-                    ProcessUtilities.outputExecutioner(sed_cmd)
-                    
-                    command = 'systemctl restart fastapi_ssh_server'
-                    ProcessUtilities.outputExecutioner(command)
-            except Exception:
-                CyberCPLogFileWriter.writeLog(f"Failed to update JWT secret: {e}")
-                pass
-
-            #####
+                from plogical.securityUtils import get_terminal_jwt_secret
+                get_terminal_jwt_secret(create_if_missing=True)
+            except Exception as error:
+                CyberCPLogFileWriter.writeToFile(
+                    f"Failed to configure Web Terminal authentication: {error}"
+                )
 
             #####
 
@@ -3665,7 +3799,7 @@ context /cyberpanel_suspension_page.html {
                     ProcessUtilities.outputExecutioner(f'cp /usr/local/CyberCP/fastapi_ssh_server.service {service_path}')
                     ProcessUtilities.outputExecutioner('systemctl daemon-reload')
             except Exception as e:
-                CyberCPLogFileWriter.writeLog(f"Failed to copy or reload fastapi_ssh_server.service: {e}")
+                CyberCPLogFileWriter.writeToFile(f"Failed to copy or reload fastapi_ssh_server.service: {e}")
             
 
             #####
@@ -3708,7 +3842,7 @@ context /cyberpanel_suspension_page.html {
                             CyberCPLogFileWriter.writeToFile(str(msg))
 
             except Exception as e:
-                CyberCPLogFileWriter.writeLog(f"Failed to ensure fastapi_ssh_server is running: {e}")
+                CyberCPLogFileWriter.writeToFile(f"Failed to ensure fastapi_ssh_server is running: {e}")
 
             # Fetch actual resource limits from lscgctl command if they exist
             Data['resource_limits'] = None
@@ -3722,8 +3856,8 @@ context /cyberpanel_suspension_page.html {
                     # Run lscgctl list-user command
                     result = subprocess.run(
                         [lscgctl_path, 'list-user', username],
-                        capture_output=True,
-                        text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        universal_newlines=True,
                         timeout=5
                     )
 
@@ -3793,6 +3927,7 @@ context /cyberpanel_suspension_page.html {
             Data['diskUsage'] = DiskUsagePercentage
             Data['diskInMB'] = DiskUsage
             Data['diskInMBTotal'] = website.package.diskSpace
+            Data.update(storage_card_context(website))
 
             Data['phps'] = PHPManager.findPHPVersions()
 
@@ -3814,7 +3949,7 @@ context /cyberpanel_suspension_page.html {
                 from datetime import datetime
                 filePath = '/etc/letsencrypt/live/%s/fullchain.pem' % (self.childDomain)
                 x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM,
-                                                       open(filePath, 'r').read())
+                                                       open(filePath, 'rb').read())
                 expireData = x509.get_notAfter().decode('ascii')
                 finalDate = datetime.strptime(expireData, '%Y%m%d%H%M%SZ')
 
@@ -4396,7 +4531,7 @@ context /cyberpanel_suspension_page.html {
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/cronUtil.py"
             execPath = execPath + " saveCronChanges --externalApp " + website.externalApp + " --line " + str(
-                line) + " --finalCron '" + finalCron + "'"
+                line) + " --finalCron " + shlex.quote(finalCron)
             output = ProcessUtilities.outputExecutioner(execPath, website.externalApp)
             CronUtil.CronPrem(0)
 
@@ -4495,7 +4630,7 @@ context /cyberpanel_suspension_page.html {
             finalCron = "%s %s %s %s %s %s" % (minute, hour, monthday, month, weekday, command)
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/cronUtil.py"
-            execPath = execPath + " addNewCron --externalApp " + website.externalApp + " --finalCron '" + finalCron + "'"
+            execPath = execPath + " addNewCron --externalApp " + website.externalApp + " --finalCron " + shlex.quote(finalCron)
             output = ProcessUtilities.outputExecutioner(execPath, website.externalApp)
 
             if ProcessUtilities.decideDistro() == ProcessUtilities.ubuntu or ProcessUtilities.decideDistro() == ProcessUtilities.ubuntu20:
@@ -4600,11 +4735,31 @@ context /cyberpanel_suspension_page.html {
             ## Create Configurations
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
-            execPath = execPath + " issueAliasSSL --masterDomain " + self.domain + " --aliasDomain " + aliasDomain + " --sslPath " + sslpath + " --administratorEmail " + admin.email
+            legacy_alias = ChildDomains.objects.filter(
+                master__domain=self.domain,
+                domain=aliasDomain,
+                alais=1,
+            ).first()
+            if legacy_alias:
+                execPath += " issueSSL --virtualHostName %s --path %s --administratorEmail %s --force 1" % (
+                    shlex.quote(aliasDomain),
+                    shlex.quote(legacy_alias.path),
+                    shlex.quote(legacy_alias.master.adminEmail),
+                )
+            else:
+                execPath += " issueAliasSSL --masterDomain %s --aliasDomain %s --sslPath %s --administratorEmail %s" % (
+                    shlex.quote(self.domain),
+                    shlex.quote(aliasDomain),
+                    shlex.quote(sslpath),
+                    shlex.quote(admin.email),
+                )
 
             output = ProcessUtilities.outputExecutioner(execPath)
 
             if output.find("1,None") > -1:
+                if legacy_alias:
+                    legacy_alias.ssl = 1
+                    legacy_alias.save(update_fields=['ssl'])
                 data_ret = {'sslStatus': 1, 'error_message': "None", "existsStatus": 0}
                 json_data = json.dumps(data_ret)
                 return HttpResponse(json_data)
@@ -4640,7 +4795,18 @@ context /cyberpanel_suspension_page.html {
             ## Create Configurations
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/virtualHostUtilities.py"
-            execPath = execPath + " deleteAlias --masterDomain " + self.domain + " --aliasDomain " + aliasDomain
+            legacy_alias = ChildDomains.objects.filter(
+                master__domain=self.domain,
+                domain=aliasDomain,
+                alais=1,
+            ).first()
+            if legacy_alias:
+                execPath += " deleteDomain --virtualHostName %s --DeleteDocRoot 0" % shlex.quote(aliasDomain)
+            else:
+                execPath += " deleteAlias --masterDomain %s --aliasDomain %s" % (
+                    shlex.quote(self.domain),
+                    shlex.quote(aliasDomain),
+                )
             output = ProcessUtilities.outputExecutioner(execPath)
 
             if output.find("1,None") > -1:
@@ -4720,6 +4886,24 @@ context /cyberpanel_suspension_page.html {
             extraArgs['adminPassword'] = data['passwordByPass']
             extraArgs['adminEmail'] = data['adminEmail']
             extraArgs['tempStatusPath'] = "/home/cyberpanel/" + str(randint(1000, 9999))
+
+            try:
+                version_response = requests.get(
+                    'https://api.wordpress.org/core/version-check/1.7/',
+                    timeout=15,
+                )
+                version_response.raise_for_status()
+                version_data = version_response.json()
+                if not isinstance(version_data, dict):
+                    raise ValueError('Invalid WordPress API response.')
+                extraArgs['WPVersion'] = select_wordpress_version(
+                    version_data.get('offers', [])
+                )
+            except (requests.RequestException, TypeError, ValueError):
+                raise BaseException(
+                    'Could not determine the current WordPress version. '
+                    'Please try the installation again.'
+                )
 
             if data['home'] == '0':
                 extraArgs['path'] = data['path']
@@ -5309,12 +5493,29 @@ StrictHostKeyChecking no
                 if adminEmail is None:
                     data['adminEmail'] = "example@example.org"
 
+                acl = ACL.objects.get(name=apiACL)
+                currentACL = ACLManager.loadedACL(admin.pk)
+
+                if ACLManager.currentContextPermission(currentACL, 'createWebsite') != 1:
+                    return ACLManager.loadErrorJson('createWebSiteStatus', 0)
+
+                if currentACL['admin'] != 1:
+                    if ACLManager.isAdminACL(acl):
+                        return ACLManager.loadErrorJson('createWebSiteStatus', 0)
+                    if currentACL.get('changeUserACL', 0) != 1 and acl.name != 'user':
+                        return ACLManager.loadErrorJson('createWebSiteStatus', 0)
+
+                if ACLManager.websitesLimitCheck(admin, int(websitesLimit)) == 0:
+                    data_ret = {'status': 0, 'createWebSiteStatus': 0,
+                                'error_message': "You've reached maximum websites limit as a reseller."}
+                    return HttpResponse(json.dumps(data_ret))
+
                 try:
-                    acl = ACL.objects.get(name=apiACL)
                     websiteOwn = Administrator(userName=websiteOwner,
                                                password=hashPassword.hash_password(ownerPassword),
                                                email=adminEmail, type=3, owner=admin.pk,
-                                               initWebsitesLimit=websitesLimit, acl=acl, api=1)
+                                               initWebsitesLimit=websitesLimit, acl=acl,
+                                               token=generate_api_token(), api=1)
                     websiteOwn.save()
                 except BaseException:
                     pass
@@ -5585,6 +5786,30 @@ StrictHostKeyChecking no
             else:
                 return ACLManager.loadErrorJson()
 
+            # Security: phpPath is client-supplied and is later `sudo mv`'d as root
+            # (see below). Without containment an attacker could overwrite any file
+            # (e.g. /etc/ld.so.preload) as root. Require it to resolve to this
+            # domain's own PHP-FPM pool file inside a known pool directory.
+            expectedBasename = domainName + '.conf'
+            realPhpPath = os.path.realpath(phpPath)
+            allowedRoots = ('/etc/php/', '/etc/opt/remi/', '/opt/remi/')
+            poolFileOk = realPhpPath.endswith('/fpm/pool.d/' + expectedBasename) or \
+                         realPhpPath.endswith('/php-fpm.d/' + expectedBasename)
+            if '..' in phpPath or os.path.basename(realPhpPath) != expectedBasename \
+                    or not realPhpPath.startswith(allowedRoots) or not poolFileOk:
+                return ACLManager.loadErrorJson()
+            phpPath = realPhpPath
+
+            # Security: pm.* values are substituted verbatim into the pool config;
+            # force them to plain integers so no extra directives can be injected.
+            try:
+                pmMaxChildren = str(int(pmMaxChildren))
+                pmStartServers = str(int(pmStartServers))
+                pmMinSpareServers = str(int(pmMinSpareServers))
+                pmMaxSpareServers = str(int(pmMaxSpareServers))
+            except (ValueError, TypeError):
+                return ACLManager.loadErrorJson()
+
             if int(pmStartServers) < int(pmMinSpareServers) or int(pmStartServers) > int(pmMinSpareServers):
                 data_ret = {'status': 0,
                             'error_message': 'pm.start_servers must not be less than pm.min_spare_servers and not greater than pm.max_spare_servers.'}
@@ -5628,7 +5853,7 @@ StrictHostKeyChecking no
             writeToFile.writelines(phpFPMConf)
             writeToFile.close()
 
-            command = 'sudo mv %s %s' % (tempStatusPath, phpPath)
+            command = 'sudo mv %s %s' % (shlex.quote(tempStatusPath), shlex.quote(phpPath))
             ProcessUtilities.executioner(command)
 
             phpPath = phpPath.split('/')
@@ -5682,31 +5907,13 @@ StrictHostKeyChecking no
         website = Websites.objects.get(domain=self.domain)
         externalApp = website.externalApp
 
-        #### update jwt secret if needed
-
-        import secrets
-        import re
-        import os
-        from plogical.processUtilities import ProcessUtilities
-
-        fastapi_file = '/usr/local/CyberCP/fastapi_ssh_server.py'
-        from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter
         try:
-            
-            content = ProcessUtilities.outputExecutioner(f'cat {fastapi_file}')
-            if 'REPLACE_ME_WITH_INSTALLER' in content:
-                new_secret = secrets.token_urlsafe(32)
-                
-                sed_cmd = f"sed -i 's|JWT_SECRET = \"REPLACE_ME_WITH_INSTALLER\"|JWT_SECRET = \"{new_secret}\"|' '{fastapi_file}'"
-                ProcessUtilities.outputExecutioner(sed_cmd)
-                
-                command = 'systemctl restart fastapi_ssh_server'
-                ProcessUtilities.outputExecutioner(command)
-        except Exception:
-            CyberCPLogFileWriter.writeLog(f"Failed to update JWT secret: {e}")
-            pass
-
-        #####
+            from plogical.securityUtils import get_terminal_jwt_secret
+            get_terminal_jwt_secret(create_if_missing=True)
+        except Exception as error:
+            CyberCPLogFileWriter.writeToFile(
+                f"Failed to configure Web Terminal authentication: {error}"
+            )
 
         from plogical.CyberCPLogFileWriter import CyberCPLogFileWriter
         # Ensure FastAPI SSH server systemd service file is in place
@@ -5718,7 +5925,7 @@ StrictHostKeyChecking no
                 ProcessUtilities.outputExecutioner(f'cp /usr/local/CyberCP/fastapi_ssh_server.service {service_path}')
                 ProcessUtilities.outputExecutioner('systemctl daemon-reload')
         except Exception as e:
-            CyberCPLogFileWriter.writeLog(f"Failed to copy or reload fastapi_ssh_server.service: {e}")
+            CyberCPLogFileWriter.writeToFile(f"Failed to copy or reload fastapi_ssh_server.service: {e}")
 
         # Ensure FastAPI SSH server is running using ProcessUtilities
         try:
@@ -5758,7 +5965,7 @@ StrictHostKeyChecking no
                         CyberCPLogFileWriter.writeToFile(str(msg))
 
         except Exception as e:
-            CyberCPLogFileWriter.writeLog(f"Failed to ensure fastapi_ssh_server is running: {e}")
+            CyberCPLogFileWriter.writeToFile(f"Failed to ensure fastapi_ssh_server is running: {e}")
 
         # Add-on check logic
         url = "https://platform.cyberpersons.com/CyberpanelAdOns/Adonpermission"
@@ -5817,10 +6024,17 @@ StrictHostKeyChecking no
     def saveSSHAccessChanges(self, userID=None, data=None):
         try:
 
+            if not isinstance(data, dict):
+                raise ValueError('Invalid request.')
+            domain = data.get('domain')
+            password = data.get('password')
+            if not isinstance(domain, str) or not isinstance(password, str):
+                raise ValueError('Invalid request.')
+
             currentACL = ACLManager.loadedACL(userID)
             admin = Administrator.objects.get(pk=userID)
 
-            self.domain = data['domain']
+            self.domain = domain
 
             if ACLManager.checkOwnership(self.domain, admin, currentACL) == 1:
                 pass
@@ -5834,14 +6048,29 @@ StrictHostKeyChecking no
             #     json_data = json.dumps(data_ret)
             #     return HttpResponse(json_data)
 
-            uBuntuPath = '/etc/lsb-release'
-
-            if os.path.exists(uBuntuPath):
-                command = "echo '%s:%s' | chpasswd" % (website.externalApp, data['password'])
-            else:
-                command = 'echo "%s" | passwd --stdin %s' % (data['password'], website.externalApp)
-
-            ProcessUtilities.executioner(command)
+            requestToken = create_system_password_request(
+                website.externalApp,
+                password,
+            )
+            pythonPath = '/usr/local/CyberCP/bin/python'
+            if not os.path.exists(pythonPath):
+                pythonPath = sys.executable
+            passwordScript = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'plogical',
+                'changeSystemPassword.py',
+            )
+            command = '%s %s --token %s' % (
+                shlex.quote(pythonPath),
+                shlex.quote(passwordScript),
+                shlex.quote(requestToken),
+            )
+            if ProcessUtilities.executioner(command) != 1:
+                try:
+                    consume_system_password_request(requestToken)
+                except Exception:
+                    pass
+                raise RuntimeError('Unable to change system password.')
 
             data_ret = {'status': 1, 'error_message': 'None', 'LinuxUser': website.externalApp}
             json_data = json.dumps(data_ret)
@@ -6378,7 +6607,8 @@ StrictHostKeyChecking no
                 if not validators.domain(self.gitHost):
                     return ACLManager.loadErrorJson('status', 'Invalid characters in your input.')
 
-            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame):
+            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame,
+                                                                              ACLManager.RepoNameRegex):
                 pass
             else:
                 return ACLManager.loadErrorJson('status', 'Invalid characters in your input.')
@@ -6794,7 +7024,8 @@ StrictHostKeyChecking no
 
             ## Security check
 
-            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame):
+            if ACLManager.validateInput(self.gitUsername) and ACLManager.validateInput(self.gitReponame,
+                                                                              ACLManager.RepoNameRegex):
                 pass
             else:
                 return ACLManager.loadErrorJson('status', 'Invalid characters in your input.')
@@ -6804,18 +7035,27 @@ StrictHostKeyChecking no
             self.externalApp = ACLManager.FetchExternalApp(self.domain)
 
             if self.overrideData:
-                command = 'rm -rf %s' % (self.folder)
+                command = 'rm -rf %s' % shlex.quote(self.folder)
                 ProcessUtilities.executioner(command, self.externalApp)
 
             ## Set defauly key
 
-            command = 'git config --global core.sshCommand "ssh -i /home/%s/.ssh/%s -o "StrictHostKeyChecking=no""' % (
+            sshCommand = 'ssh -i /home/%s/.ssh/%s -o StrictHostKeyChecking=no' % (
                 self.masterDomain, self.externalAppLocal)
+            command = 'git config --global core.sshCommand %s' % shlex.quote(sshCommand)
             ProcessUtilities.executioner(command, self.externalApp)
 
             ##
 
-            command = 'git clone git@%s:%s/%s.git %s' % (self.gitHost, self.gitUsername, self.gitReponame, self.folder)
+            cloneURL = WebsiteManager.gitCloneURL(
+                self.gitHost,
+                self.gitUsername,
+                self.gitReponame,
+            )
+            command = 'git clone %s %s' % (
+                shlex.quote(cloneURL),
+                shlex.quote(self.folder),
+            )
             commandStatus = ProcessUtilities.outputExecutioner(command, self.externalApp)
 
             if commandStatus.find('already exists') == -1 and commandStatus.find('Permission denied') == -1:
@@ -6825,10 +7065,16 @@ StrictHostKeyChecking no
                 # fm = FileManager(None, None)
                 # fm.fixPermissions(self.masterDomain)
 
-                command = 'git -C %s config --local user.email %s' % (self.folder, self.adminEmail)
+                command = 'git -C %s config --local user.email %s' % (
+                    shlex.quote(self.folder),
+                    shlex.quote(self.adminEmail),
+                )
                 ProcessUtilities.executioner(command, self.externalApp)
 
-                command = 'git -C %s config --local user.name "%s %s"' % (self.folder, self.firstName, self.lastName)
+                command = 'git -C %s config --local user.name %s' % (
+                    shlex.quote(self.folder),
+                    shlex.quote('%s %s' % (self.firstName, self.lastName)),
+                )
                 ProcessUtilities.executioner(command, self.externalApp)
 
                 data_ret = {'status': 1, 'commandStatus': commandStatus}
@@ -7442,34 +7688,7 @@ StrictHostKeyChecking no
             cat = "cat " + pathToKeyFile
             data = ProcessUtilities.outputExecutioner(cat, website.externalApp).split('\n')
 
-            json_data = "["
-            checker = 0
-
-            for items in data:
-                if items.find("ssh-rsa") > -1:
-                    keydata = items.split(" ")
-
-                    try:
-                        key = "ssh-rsa " + keydata[1][:50] + "  ..  " + keydata[2]
-                        try:
-                            userName = keydata[2][:keydata[2].index("@")]
-                        except:
-                            userName = keydata[2]
-                    except:
-                        key = "ssh-rsa " + keydata[1][:50]
-                        userName = ''
-
-                    dic = {'userName': userName,
-                           'key': key,
-                           }
-
-                    if checker == 0:
-                        json_data = json_data + json.dumps(dic)
-                        checker = 1
-                    else:
-                        json_data = json_data + ',' + json.dumps(dic)
-
-            json_data = json_data + ']'
+            json_data = json.dumps(authorized_key_records(data))
 
             final_json = json.dumps({'status': 1, 'error_message': "None", "data": json_data})
             return HttpResponse(final_json)
@@ -7500,7 +7719,10 @@ StrictHostKeyChecking no
             ProcessUtilities.outputExecutioner(command)
 
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/firewallUtilities.py"
-            execPath = execPath + " deleteSSHKey --key '%s' --path %s" % (key, pathToKeyFile)
+            execPath = execPath + " deleteSSHKey --key %s --path %s" % (
+                shlex.quote(key),
+                shlex.quote(pathToKeyFile),
+            )
 
             output = ProcessUtilities.outputExecutioner(execPath, website.externalApp)
 
@@ -7509,12 +7731,16 @@ StrictHostKeyChecking no
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
             else:
-                final_dic = {'status': 1, 'delete_status': 1, "error_mssage": output}
+                final_dic = {
+                    'status': 0,
+                    'delete_status': 0,
+                    'error_message': output,
+                }
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
         except BaseException as msg:
-            final_dic = {'status': 0, 'delete_status': 0, 'error_mssage': str(msg)}
+            final_dic = {'status': 0, 'delete_status': 0, 'error_message': str(msg)}
             final_json = json.dumps(final_dic)
             return HttpResponse(final_json)
 
@@ -7684,7 +7910,7 @@ StrictHostKeyChecking no
         response = requests.post(url, data=json.dumps(data))
         Status = response.json()['status']
 
-        if True:
+        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
             adminNames = ACLManager.loadAllUsers(userID)
             Data = {'adminNames': adminNames}
 
@@ -7861,13 +8087,27 @@ StrictHostKeyChecking no
             WPemal = data['WPemal']
             WPpasswd = data['WPpasswd']
 
-            if int(MYsqlRam) < 256:
+            if App not in DOCKER_APPS:
+                final_dic = {'status': 0, 'error_message': f'Unknown application: {App}.'}
+                final_json = json.dumps(final_dic)
+                return HttpResponse(final_json)
+
+            AppMeta = DOCKER_APPS[App]
+
+            ## Apps without their own database container ignore the MySQL resources entirely.
+
+            if AppMeta['requiresDB'] and int(MYsqlRam) < 256:
                 final_dic = {'status': 0, 'error_message': 'Minimum MySQL ram should be 256MB.'}
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
-            if int(SiteRam) < 256:
-                final_dic = {'status': 0, 'error_message': 'Minimum site ram should be 256MB.'}
+            if not AppMeta['requiresDB']:
+                MysqlCPU = 0
+                MYsqlRam = 0
+
+            if int(SiteRam) < AppMeta['minSiteRam']:
+                final_dic = {'status': 0,
+                             'error_message': f"Minimum site ram for {App} should be {AppMeta['minSiteRam']}MB."}
                 final_json = json.dumps(final_dic)
                 return HttpResponse(final_json)
 
@@ -8024,7 +8264,7 @@ StrictHostKeyChecking no
         response = requests.post(url, data=json.dumps(data))
         Status = response.json()['status']
 
-        if True:
+        if (Status == 1) or ProcessUtilities.decideServer() == ProcessUtilities.ent:
             currentACL = ACLManager.loadedACL(userID)
             admin = Administrator.objects.get(pk=userID)
 
@@ -8190,4 +8430,3 @@ StrictHostKeyChecking no
             data_ret = {'status': 0, 'error_message': str(msg)}
             json_data = json.dumps(data_ret)
             return HttpResponse(json_data)
-

@@ -3506,7 +3506,7 @@ app.controller('manageAliasController', function ($scope, $http, $timeout, $wind
         e.preventDefault();
     });
 
-    var masterDomain = "";
+    var masterDomain = ($("#domainNamePage").text() || "").trim();
 
     $scope.aliasTable = false;
     $scope.addAliasButton = false;
@@ -3516,6 +3516,10 @@ app.controller('manageAliasController', function ($scope, $http, $timeout, $wind
     $scope.aliasCreated = true;
     $scope.manageAliasLoading = true;
     $scope.operationSuccess = true;
+
+    if (masterDomain) {
+        $scope.masterDomain = masterDomain;
+    }
 
     $scope.createAliasEnter = function ($event) {
         var keyCode = $event.which || $event.keyCode;
@@ -3686,6 +3690,13 @@ app.controller('manageAliasController', function ($scope, $http, $timeout, $wind
         }
 
 
+    };
+
+    $scope.confirmRemoveAlias = function (masterDomain, aliasDomain) {
+        var message = ($("#aliasDeleteConfirmation").text() || "").trim();
+        if ($window.confirm(message)) {
+            $scope.removeAlias(masterDomain, aliasDomain);
+        }
     };
 
     $scope.removeAlias = function (masterDomain, aliasDomain) {
@@ -5862,7 +5873,7 @@ app.controller('sshAccess', function ($scope, $http, $timeout) {
 
     populateCurrentKeys();
 
-    $scope.deleteKey = function (key) {
+    $scope.deleteKey = function (keyId) {
 
         $scope.wpInstallLoading = false;
 
@@ -5870,7 +5881,7 @@ app.controller('sshAccess', function ($scope, $http, $timeout) {
 
         var data = {
             domain: $("#domainName").text(),
-            key: key,
+            key: keyId,
         };
 
         var config = {

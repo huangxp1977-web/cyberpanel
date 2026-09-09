@@ -35,7 +35,13 @@ import googleapiclient.discovery
 from googleapiclient.discovery import build
 from websiteFunctions.models import NormalBackupDests, NormalBackupJobs, NormalBackupSites
 from plogical.IncScheduler import IncScheduler
+from plogical.remoteTransferResponse import parse_remote_transfer_response
+from plogical.normalBackupUtilities import (
+    normalize_backup_retention_days,
+    normalize_local_backup_path,
+)
 from django.http import JsonResponse
+from cyberpanel_version import version_at_least
 
 class BackupManager:
     localBackupPath = '/home/cyberpanel/localBackupPath'
@@ -623,12 +629,22 @@ class BackupManager:
             backupCancellationDomain = data['backupCancellationDomain']
             fileName = data['fileName']
 
+            ### Ownership check: the privileged worker below kills a PID, deletes the
+            ### backup archive and rewrites the status file purely from the supplied
+            ### domain/fileName, so a caller must own the domain being cancelled.
+            currentACL = ACLManager.loadedACL(userID)
+            admin = Administrator.objects.get(pk=userID)
+            if ACLManager.checkOwnership(backupCancellationDomain, admin, currentACL) != 1:
+                return ACLManager.loadErrorJson('abortStatus', 0)
+
             execPath = "/usr/local/CyberCP/bin/python " + virtualHostUtilities.cyberPanel + "/plogical/backupUtilities.py"
             execPath = execPath + " cancelBackupCreation --backupCancellationDomain " + backupCancellationDomain + " --fileName " + fileName
             subprocess.call(shlex.split(execPath))
 
             try:
-                backupOb = Backups.objects.get(fileName=fileName)
+                ### Scope the row deletion to the owned domain so a matching fileName
+                ### from another tenant's backup can never be removed.
+                backupOb = Backups.objects.get(fileName=fileName, website__domain=backupCancellationDomain)
                 backupOb.delete()
             except BaseException as msg:
                 logging.CyberCPLogFileWriter.writeToFile(str(msg) + " [cancelBackupCreation]")
@@ -844,7 +860,13 @@ class BackupManager:
                     final_json = json.dumps(final_dic)
                     return HttpResponse(final_json)
             else:
-                config = {'type': data['type'], 'path': data['path']}
+                try:
+                    localPath = normalize_local_backup_path(data.get('path', ''))
+                except ValueError as msg:
+                    final_dic = {'status': 0, 'destStatus': 0, 'error_message': str(msg)}
+                    return HttpResponse(json.dumps(final_dic))
+
+                config = {'type': data['type'], 'path': localPath}
                 nd = NormalBackupDests(name=data['name'], config=json.dumps(config))
                 nd.save()
 
@@ -1016,7 +1038,7 @@ class BackupManager:
             selectedAccount = data['selectedAccount']
             name = data['name']
             backupFrequency = data['backupFrequency']
-            backupRetention = data['backupRetention']
+            backupRetention = normalize_backup_retention_days(data['backupRetention'])
 
             currentACL = ACLManager.loadedACL(userID)
 
@@ -1136,7 +1158,7 @@ class BackupManager:
 
                 if data['getVersion'] == 1:
 
-                    if float(data['currentVersion']) >= 1.6 and data['build'] >= 0:
+                    if version_at_least(data['currentVersion'], data['build'], '1.6'):
                         pass
                     else:
                         data_ret = {'status': 0,
@@ -1272,23 +1294,23 @@ class BackupManager:
 
 
                 ipFile = os.path.join("/etc", "cyberpanel", "machineIP")
-                f = open(ipFile)
-                ownIP = f.read()
+                with open(ipFile) as ip_file:
+                    ownIP = ip_file.read().strip()
 
                 finalData = json.dumps({'username': "admin", "password": password, "ipAddress": ownIP,
                                         "accountsToTransfer": accountsToTransfer, 'port': port})
 
                 url = "https://" + ipAddress + ":8090/api/remoteTransfer"
 
-                r = requests.post(url, data=finalData, verify=False)
+                r = requests.post(url, data=finalData, verify=False, timeout=30)
 
                 if os.path.exists('/usr/local/CyberCP/debug'):
                     message = 'Remote transfer initiation status: %s' % (r.text)
                     logging.CyberCPLogFileWriter.writeToFile(message)
 
-                data = json.loads(r.text)
+                transfer_status, transfer_dir, remote_error = parse_remote_transfer_response(r)
 
-                if data['transferStatus'] == 1:
+                if transfer_status == 1:
 
                     ## Create local backup dir
 
@@ -1300,7 +1322,7 @@ class BackupManager:
 
                     ## create local directory that will host backups
 
-                    localStoragePath = "/home/backup/transfer-" + str(data['dir'])
+                    localStoragePath = "/home/backup/transfer-" + transfer_dir
 
                     ## making local storage directory for backups
 
@@ -1311,12 +1333,12 @@ class BackupManager:
                     ProcessUtilities.executioner(command)
 
                     final_json = json.dumps(
-                        {'remoteTransferStatus': 1, 'error_message': "None", "dir": data['dir']})
+                        {'remoteTransferStatus': 1, 'error_message': "None", "dir": transfer_dir})
                     return HttpResponse(final_json)
                 else:
                     final_json = json.dumps({'remoteTransferStatus': 0,
                                              'error_message': "Can not initiate remote transfer. Error message: " +
-                                                              data['error_message']})
+                                                              remote_error})
                     return HttpResponse(final_json)
 
             except BaseException as msg:
@@ -1700,6 +1722,7 @@ class BackupManager:
                 'lastRun': lastRun,
                 'allSites': allSites,
                 'currently': frequency,
+                'retention': retention,
                 'currentStatus': currentStatus
             }
             json_data = json.dumps(data_ret)
@@ -1860,9 +1883,9 @@ class BackupManager:
             config = json.loads(nbj.config)
             config[IncScheduler.frequency] = backupFrequency
             try:
-                backupRetention = data['backupRetention']
+                backupRetention = normalize_backup_retention_days(data['backupRetention'])
                 config[IncScheduler.retention] = backupRetention
-            except:
+            except KeyError:
                 pass
 
 
@@ -2775,5 +2798,3 @@ class BackupManager:
 
         except Exception as e:
             return JsonResponse({'status': 0, 'error_message': str(e)})
-
-

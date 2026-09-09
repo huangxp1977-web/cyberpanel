@@ -14,10 +14,11 @@ from plogical.backupUtilities import backupUtilities
 from re import match,I,M
 from websiteFunctions.models import Backups, BackupJob, BackupJobLogs
 from plogical.processUtilities import ProcessUtilities
-from random import randint
+from plogical.backupIntegrity import archive_is_ready, resolve_archive_path
 import json, requests
 from datetime import datetime
 import signal
+from plogical.securityUtils import create_backup_request
 
 
 class backupSchedule:
@@ -46,20 +47,44 @@ class backupSchedule:
             return "Can not write to error file."
 
     @staticmethod
+    def backupArchiveIsReady(archivePath, settleSeconds=10, maxWaitSeconds=300, stableChecks=3):
+        return archive_is_ready(archivePath, settleSeconds, maxWaitSeconds, stableChecks)
+
+    @staticmethod
+    def resolveBackupArchivePath(virtualHost, tempStoragePath, fileName):
+        return resolve_archive_path(virtualHost, tempStoragePath, fileName)
+
+    @staticmethod
+    def completedArchiveIsReady(virtualHost, tempStoragePath, fileName, backupLogPath):
+        archivePath = backupSchedule.resolveBackupArchivePath(virtualHost, tempStoragePath, fileName)
+        if backupSchedule.backupArchiveIsReady(archivePath):
+            return True
+
+        backupSchedule.remoteBackupLogging(
+            backupLogPath,
+            "Local backup failed for %s: archive was missing, empty, or still changing (%s)" %
+            (virtualHost, archivePath),
+            backupSchedule.ERROR
+        )
+        return False
+
+    @staticmethod
+    def removeBackupMarkers(statusPath, backupFileNamePath, pidPath):
+        for markerPath in (statusPath, backupFileNamePath, pidPath):
+            ProcessUtilities.normalExecutioner('sudo rm -f ' + markerPath)
+
+    @staticmethod
     def createLocalBackup(virtualHost, backupLogPath):
         try:
 
             backupSchedule.remoteBackupLogging(backupLogPath, "Starting local backup for: " + virtualHost)
 
             ###
-            randNBR = str(randint(10**9, 10**10 - 1))
-            pathToFile = "/home/cyberpanel/" + randNBR
-            file = open(pathToFile, "w+")
-            file.close()
+            requestToken = create_backup_request(virtualHost)
 
             port = ProcessUtilities.fetchCurrentPort()
 
-            finalData = json.dumps({'randomFile': randNBR, 'websiteToBeBacked': virtualHost})
+            finalData = json.dumps({'randomFile': requestToken, 'websiteToBeBacked': virtualHost})
             r = requests.post("https://localhost:%s/backup/localInitiate" % (port), data=finalData, verify=False)
 
             if os.path.exists(ProcessUtilities.debugPath):
@@ -77,7 +102,7 @@ class backupSchedule:
             while (1):
 
                 backupDomain = virtualHost
-                status = os.path.join("/home", backupDomain, "backup/status")
+                statusPath = os.path.join("/home", backupDomain, "backup/status")
                 backupFileNamePath = os.path.join("/home", backupDomain, "backup/backupFileName")
                 pid = os.path.join("/home", backupDomain, "backup/pid")
                 ## read file name
@@ -99,19 +124,26 @@ class backupSchedule:
                         message = 'If running found.'
                         logging.CyberCPLogFileWriter.writeToFile(message)
 
-                    if os.path.exists(status):
+                    if os.path.exists(statusPath):
                         if os.path.exists('/usr/local/CyberCP/debug'):
                             message = 'If running found. and status file exists'
                             logging.CyberCPLogFileWriter.writeToFile(message)
 
-                        status = open(status, 'r').read()
+                        status = open(statusPath, 'r').read()
                         time.sleep(2)
 
                         if status.find("Completed") > -1:
 
+                            if not backupSchedule.completedArchiveIsReady(
+                                    virtualHost, tempStoragePath, fileName, backupLogPath):
+                                backupSchedule.removeBackupMarkers(
+                                    statusPath, backupFileNamePath, pid
+                                )
+                                return 0, tempStoragePath
+
                             ### Removing Files
 
-                            command = 'sudo rm -f ' + status
+                            command = 'sudo rm -f ' + statusPath
                             ProcessUtilities.normalExecutioner(command)
 
                             command = 'sudo rm -f ' + backupFileNamePath
@@ -121,10 +153,6 @@ class backupSchedule:
                             ProcessUtilities.normalExecutioner(command)
 
                             backupSchedule.remoteBackupLogging(backupLogPath, "Backup Completed for: " + virtualHost)
-                            try:
-                                os.remove(pathToFile)
-                            except:
-                                pass
                             return 1, tempStoragePath
 
                         elif status.find("[5009]") > -1:
@@ -133,7 +161,7 @@ class backupSchedule:
                                 logging.CyberCPLogFileWriter.writeToFile(message)
                             ## removing status file, so that backup can re-run
                             try:
-                                command = 'sudo rm -f ' + status
+                                command = 'sudo rm -f ' + statusPath
                                 ProcessUtilities.normalExecutioner(command)
 
                                 command = 'sudo rm -f ' + backupFileNamePath
@@ -156,11 +184,6 @@ class backupSchedule:
                                                                "Local backup creating failed for %s, Error message: %s" % (
                                                                virtualHost, status), backupSchedule.ERROR)
 
-                            try:
-                                os.remove(pathToFile)
-                            except:
-                                pass
-
                             command = 'rm -rf %s' % (tempStoragePath)
                             ProcessUtilities.normalExecutioner(command)
                             return 0, tempStoragePath
@@ -181,18 +204,25 @@ class backupSchedule:
                     if os.path.exists('/usr/local/CyberCP/debug'):
                         message = 'If running not found.'
                         logging.CyberCPLogFileWriter.writeToFile(message)
-                    if os.path.exists(status):
+                    if os.path.exists(statusPath):
                         if os.path.exists('/usr/local/CyberCP/debug'):
                             message = 'if running not found, Status file exists'
                             logging.CyberCPLogFileWriter.writeToFile(message)
-                        status = open(status, 'r').read()
+                        status = open(statusPath, 'r').read()
                         time.sleep(2)
 
                         if status.find("Completed") > -1:
 
+                            if not backupSchedule.completedArchiveIsReady(
+                                    virtualHost, tempStoragePath, fileName, backupLogPath):
+                                backupSchedule.removeBackupMarkers(
+                                    statusPath, backupFileNamePath, pid
+                                )
+                                return 0, tempStoragePath
+
                             ### Removing Files
 
-                            command = 'sudo rm -f ' + status
+                            command = 'sudo rm -f ' + statusPath
                             ProcessUtilities.normalExecutioner(command)
 
                             command = 'sudo rm -f ' + backupFileNamePath
@@ -202,10 +232,6 @@ class backupSchedule:
                             ProcessUtilities.normalExecutioner(command)
 
                             backupSchedule.remoteBackupLogging(backupLogPath, "Backup Completed for: " + virtualHost)
-                            try:
-                                os.remove(pathToFile)
-                            except:
-                                pass
                             return 1, tempStoragePath
                         elif os.path.exists(schedulerPath):
 

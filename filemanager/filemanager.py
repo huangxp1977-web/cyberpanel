@@ -1,4 +1,6 @@
 import os
+import shlex
+import sys
 
 from django.shortcuts import HttpResponse
 import json
@@ -8,6 +10,11 @@ from websiteFunctions.models import Websites
 from random import randint
 from django.core.files.storage import FileSystemStorage
 from plogical.acl import ACLManager
+from plogical.archiveExtractionJobs import (
+    build_archive_extraction_command,
+    create_archive_extraction_job,
+    get_archive_extraction_status,
+)
 from filemanager.models import Trash
 
 
@@ -716,29 +723,40 @@ class FileManager:
 
             finalData = {}
             finalData['status'] = 1
-            domainName = self.data['domainName']
-            try:
-                website = Websites.objects.get(domain=domainName)
-
-                pathCheck = '/home/%s' % (domainName)
-
-                if self.notInside(self.data['fileName'], pathCheck):
+            domainName = self.data.get('domainName', '')
+            if domainName:
+                try:
+                    website = Websites.objects.get(domain=domainName)
+                except Websites.DoesNotExist:
                     return self.ajaxPre(0, 'Not allowed.')
-
-                # Ensure proper UTF-8 handling for file reading
-                # Use explicit UTF-8 locale for the cat command
-                command = 'LANG=C.UTF-8 LC_ALL=C.UTF-8 cat ' + self.returnPathEnclosed(self.data['fileName'])
-                finalData['fileContents'] = ProcessUtilities.outputExecutioner(command, website.externalApp)
-            except:
+                pathCheck = '/home/%s' % (domainName)
+            else:
                 pathCheck = '/'
 
-                if self.notInside(self.data['fileName'], pathCheck):
-                    return self.ajaxPre(0, 'Not allowed.')
-
-                # Ensure proper UTF-8 handling for file reading
-                # Use explicit UTF-8 locale for the cat command
-                command = 'LANG=C.UTF-8 LC_ALL=C.UTF-8 cat ' + self.returnPathEnclosed(self.data['fileName'])
-                finalData['fileContents'] = ProcessUtilities.outputExecutioner(command)
+            pythonPath = '/usr/local/CyberCP/bin/python'
+            if not os.path.exists(pythonPath):
+                pythonPath = sys.executable
+            readScript = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'plogical',
+                'safeFileRead.py',
+            )
+            command = '%s %s --allowed-root %s --file %s' % (
+                shlex.quote(pythonPath),
+                shlex.quote(readScript),
+                shlex.quote(pathCheck),
+                shlex.quote(self.data['fileName']),
+            )
+            websiteUser = website.externalApp if domainName else None
+            readStatus, fileContents = ProcessUtilities.outputExecutioner(
+                command,
+                websiteUser,
+                shell=False,
+                retRequired=True,
+            )
+            if readStatus != 1:
+                return self.ajaxPre(0, 'Not allowed.')
+            finalData['fileContents'] = fileContents
 
 
             # Ensure proper UTF-8 encoding in JSON response
@@ -895,55 +913,71 @@ class FileManager:
             finalData = {}
             finalData['status'] = 1
 
-            domainName = self.data['domainName']
-
-            try:
-
-                website = Websites.objects.get(domain=domainName)
-
+            domainName = self.data.get('domainName', '')
+            websiteUser = None
+            if domainName:
+                try:
+                    website = Websites.objects.get(domain=domainName)
+                except Websites.DoesNotExist:
+                    return self.ajaxPre(0, 'Not allowed.')
                 homePath = '/home/%s' % (domainName)
-
-                if self.notInside(self.data['extractionLocation'], homePath):
-                    return self.ajaxPre(0, 'Not allowed to move in this path, please choose location inside home!')
-
-                if self.notInside(self.data['fileToExtract'], homePath):
-                    return self.ajaxPre(0, 'Not allowed to move in this path, please choose location inside home!')
-
-                if self.data['extractionType'] == 'zip':
-                    command = 'unzip -o ' + self.returnPathEnclosed(
-                        self.data['fileToExtract']) + ' -d ' + self.returnPathEnclosed(self.data['extractionLocation'])
-                else:
-                    command = 'tar -xf ' + self.returnPathEnclosed(
-                        self.data['fileToExtract']) + ' -C ' + self.returnPathEnclosed(self.data['extractionLocation'])
-
-                ProcessUtilities.executioner(command, website.externalApp)
-
-                #self.fixPermissions(domainName)
-            except:
-
+                websiteUser = website.externalApp
+            else:
                 homePath = '/'
 
-                if self.notInside(self.data['extractionLocation'], homePath):
-                    return self.ajaxPre(0, 'Not allowed to move in this path, please choose location inside home!')
+            if self.notInside(self.data['extractionLocation'], homePath):
+                return self.ajaxPre(0, 'Not allowed to move in this path, please choose location inside home!')
+            if self.notInside(self.data['fileToExtract'], homePath):
+                return self.ajaxPre(0, 'Not allowed to move in this path, please choose location inside home!')
 
-                if self.notInside(self.data['fileToExtract'], homePath):
-                    return self.ajaxPre(0, 'Not allowed to move in this path, please choose location inside home!')
+            extractionType = self.data['extractionType']
+            if extractionType not in ('zip', 'tar', 'tar.gz', 'tgz'):
+                return self.ajaxPre(0, 'Unsupported archive type.')
 
-                if self.data['extractionType'] == 'zip':
-                    command = 'unzip -o ' + self.returnPathEnclosed(
-                        self.data['fileToExtract']) + ' -d ' + self.returnPathEnclosed(self.data['extractionLocation'])
-                else:
-                    command = 'tar -xf ' + self.returnPathEnclosed(
-                        self.data['fileToExtract']) + ' -C ' + self.returnPathEnclosed(self.data['extractionLocation'])
+            pythonPath = '/usr/local/CyberCP/bin/python'
+            if not os.path.exists(pythonPath):
+                pythonPath = sys.executable
+            jobToken, statusPath = create_archive_extraction_job(
+                self.request.session['userID'],
+                domainName,
+            )
+            command = build_archive_extraction_command(
+                token=jobToken,
+                status_path=statusPath,
+                allowed_root=homePath,
+                archive_path=self.data['fileToExtract'],
+                destination=self.data['extractionLocation'],
+                archive_type=extractionType,
+                run_as=websiteUser,
+                python_path=pythonPath,
+            )
+            result = ProcessUtilities.executioner(command)
+            if result != 1:
+                return self.ajaxPre(0, 'Archive extraction could not be started.')
 
-                ProcessUtilities.executioner(command)
-
-
+            finalData['job'] = jobToken
+            finalData['state'] = 'queued'
             json_data = json.dumps(finalData)
             return HttpResponse(json_data)
 
         except BaseException as msg:
             return self.ajaxPre(0, str(msg))
+
+    def extractionStatus(self):
+        try:
+            domainName = self.data.get('domainName', '')
+            status = get_archive_extraction_status(
+                self.data.get('job', ''),
+                self.request.session['userID'],
+                domainName,
+            )
+            status['status'] = 1
+            return HttpResponse(json.dumps(status))
+        except PermissionError:
+            return self.ajaxPre(0, 'Archive extraction job is not available.')
+        except BaseException as msg:
+            logging.writeToFile(str(msg) + ' [FileManager.extractionStatus]')
+            return self.ajaxPre(0, 'Archive extraction status is not available.')
 
     def compress(self):
         try:
@@ -1080,11 +1114,14 @@ class FileManager:
         command = "find %s -type f -exec chmod 0644 {} \;" % self.returnPathEnclosed(publicHtmlPath)
         ProcessUtilities.executioner(command)
 
-        # Set ownership for all files inside public_html to user:user
-        command = 'chown -R -P %s:%s %s/*' % (externalApp, externalApp, self.returnPathEnclosed(publicHtmlPath))
-        ProcessUtilities.executioner(command)
-
-        command = 'chown -R -P %s:%s %s/.[^.]*' % (externalApp, externalApp, self.returnPathEnclosed(publicHtmlPath))
+        # Set ownership for all files inside public_html to user:user.
+        # Recurse the directory itself instead of a "path/*" shell glob: commands that
+        # run as root go through subprocess with shell=False (shlex.split), so the glob
+        # was handed to chown literally, matched nothing, and left restored files owned
+        # by root/the source UID — the cause of WordPress asking for FTP credentials
+        # after a restore (#1735). -R also covers dotfiles, so the separate hidden-file
+        # pass is no longer needed; the directory's own group is reset to nogroup below.
+        command = 'chown -R -P %s:%s %s' % (externalApp, externalApp, self.returnPathEnclosed(publicHtmlPath))
         ProcessUtilities.executioner(command)
 
         # Process child domains first
@@ -1108,11 +1145,11 @@ class FileManager:
             command = "find %s -type f -exec chmod 0644 {} \;" % childPathArg
             ProcessUtilities.executioner(command)
 
-            # Set ownership for all files inside child domain to user:user
-            command = 'chown -R -P %s:%s %s/*' % (externalApp, externalApp, childPathArg)
-            ProcessUtilities.executioner(command)
-
-            command = 'chown -R -P %s:%s %s/.[^.]*' % (externalApp, externalApp, childPathArg)
+            # Set ownership for all files inside the child domain to user:user.
+            # Recurse the directory itself (no "path/*" glob) — see #1735 above: the glob
+            # is passed literally under shell=False and never matches. The child domain
+            # directory's own group is reset to nogroup below.
+            command = 'chown -R -P %s:%s %s' % (externalApp, externalApp, childPathArg)
             ProcessUtilities.executioner(command)
 
             # Set child domain directory itself to 755 with user:nogroup

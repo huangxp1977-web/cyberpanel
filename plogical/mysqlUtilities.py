@@ -139,7 +139,8 @@ class mysqlUtilities:
 
             if dbcreate:
 
-                query = "CREATE DATABASE %s" % (dbname)
+                query = "CREATE DATABASE %s" % (
+                    mysqlUtilities.quoteIdentifier(dbname))
 
                 if os.path.exists(ProcessUtilities.debugPath):
                     logging.CyberCPLogFileWriter.writeToFile(query)
@@ -148,27 +149,34 @@ class mysqlUtilities:
 
             ## create user
 
-            if mysqlUtilities.REMOTEHOST.find('ondigitalocean') > -1:
-                query = "CREATE USER '%s'@'%s' IDENTIFIED WITH mysql_native_password BY '%s'" % (
-                dbuser, HostToUse, dbpassword)
-            else:
-                query = "CREATE USER '" + dbuser + "'@'%s' IDENTIFIED BY '" % (
-                    HostToUse) + dbpassword + "'"
+            def createUserForHost(hostToUse):
+                if mysqlUtilities.REMOTEHOST.find('ondigitalocean') > -1:
+                    query = "CREATE USER %s@%s IDENTIFIED WITH mysql_native_password BY %s"
+                else:
+                    query = "CREATE USER %s@%s IDENTIFIED BY %s"
 
-            if os.path.exists(ProcessUtilities.debugPath):
-                logging.CyberCPLogFileWriter.writeToFile(query)
-
-            cursor.execute(query)
-
-            if mysqlUtilities.RDS == 0:
-                cursor.execute("GRANT ALL PRIVILEGES ON " + dbname + ".* TO '" + dbuser + "'@'%s'" % (HostToUse))
                 if os.path.exists(ProcessUtilities.debugPath):
-                    logging.CyberCPLogFileWriter.writeToFile("GRANT ALL PRIVILEGES ON " + dbname + ".* TO '" + dbuser + "'@'%s'" % (HostToUse))
-            else:
-                cursor.execute(
-                    "GRANT INDEX, DROP, UPDATE, ALTER, CREATE, SELECT, INSERT, DELETE ON " + dbname + ".* TO '" + dbuser + "'@'%s'" % (HostToUse))
+                    logging.CyberCPLogFileWriter.writeToFile(query)
+
+                cursor.execute(query, (dbuser, hostToUse, dbpassword))
+
+                if mysqlUtilities.RDS == 0:
+                    grant = "GRANT ALL PRIVILEGES ON %s.* TO %%s@%%s" % (
+                        mysqlUtilities.quoteIdentifier(dbname))
+                else:
+                    grant = "GRANT INDEX, DROP, UPDATE, ALTER, CREATE, SELECT, INSERT, DELETE ON %s.* TO %%s@%%s" % (
+                        mysqlUtilities.quoteIdentifier(dbname))
+                cursor.execute(grant, (dbuser, hostToUse))
                 if os.path.exists(ProcessUtilities.debugPath):
-                    logging.CyberCPLogFileWriter.writeToFile("GRANT INDEX, DROP, UPDATE, ALTER, CREATE, SELECT, INSERT, DELETE ON " + dbname + ".* TO '" + dbuser + "'@'%s'" % (HostToUse))
+                    logging.CyberCPLogFileWriter.writeToFile(grant)
+
+            createUserForHost(HostToUse)
+
+            if dbcreate == 1 and HostToUse != '127.0.0.1' and mysqlUtilities.REMOTEHOST in ('', 'localhost', '127.0.0.1'):
+                try:
+                    createUserForHost('127.0.0.1')
+                except BaseException as msg:
+                    logging.CyberCPLogFileWriter.writeToFile(str(msg) + " [createDatabase:127.0.0.1]")
 
             connection.close()
 
@@ -399,6 +407,47 @@ password=%s
             return 0
 
     @staticmethod
+    def restoreRusticDatabase(databaseName, rusticRepoName, externalApp,
+                              snapshotid, mysqluser, mysqlhost, mysqlport):
+        try:
+            repository = shlex.split(rusticRepoName or '')
+            if len(repository) != 1:
+                return 0
+
+            dumpCommand = [
+                'sudo', '-u', externalApp, 'rustic', '-r', repository[0],
+                'dump', '%s:%s.sql' % (snapshotid, databaseName),
+                '--password', '',
+            ]
+            mysqlCommand = [
+                'mysql', '--defaults-file=/home/cyberpanel/.my.cnf',
+                '-u', mysqluser, '--host=%s' % mysqlhost,
+                '--port', str(mysqlport), databaseName,
+            ]
+
+            dumpProcess = subprocess.Popen(
+                dumpCommand, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            importProcess = subprocess.Popen(
+                mysqlCommand, stdin=dumpProcess.stdout,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            dumpProcess.stdout.close()
+            importProcess.communicate()
+            dumpProcess.wait()
+
+            if dumpProcess.returncode == 0 and importProcess.returncode == 0:
+                return 1
+            logging.CyberCPLogFileWriter.writeToFile(
+                'Rustic database restore failed for %s.' % databaseName)
+            return 0
+        except BaseException as msg:
+            logging.CyberCPLogFileWriter.writeToFile(
+                str(msg) + '[restoreRusticDatabase]')
+            return 0
+
+    @staticmethod
     def restoreDatabaseBackup(databaseName, tempStoragePath, dbPassword, passwordCheck = None, additionalName = None, rustic=0, RusticRepoName = None, externalApp = None, snapshotid = None):
         """
         Enhanced restore with automatic format detection
@@ -507,13 +556,10 @@ password=%s
 
                 return 1
             else:
-                command = f'sudo -u {externalApp} rustic -r {RusticRepoName} dump {snapshotid}:{databaseName}.sql --password "" 2>/dev/null | mysql --defaults--file=/home/cyberpanel/.my.cnf -u %s --host=%s --port %s %s' % (
-                mysqluser, mysqlhost, mysqlport, databaseName)
-                if os.path.exists(ProcessUtilities.debugPath):
-                    logging.CyberCPLogFileWriter.writeToFile(f'{command} {tempStoragePath}/{databaseName} ')
-                ProcessUtilities.outputExecutioner(command, None, True)
-
-                return 1
+                return mysqlUtilities.restoreRusticDatabase(
+                    databaseName, RusticRepoName, externalApp, snapshotid,
+                    mysqluser, mysqlhost, mysqlport,
+                )
 
         except BaseException as msg:
             logging.CyberCPLogFileWriter.writeToFile(str(msg) + "[restoreDatabaseBackup]")
@@ -988,19 +1034,33 @@ password=%s
                 LOCALHOST = mysqlUtilities.LOCALHOST
 
             if encrypt == None:
-                try:
-                    dbuser = DBUsers.objects.get(user=userName)
-                    query = "SET PASSWORD FOR '" + userName + "'@'%s' = PASSWORD('" % (LOCALHOST) + dbPassword + "')"
-                except:
-                    userName = mysqlUtilities.fetchuser(userName)
-                    query = "SET PASSWORD FOR '" + userName + "'@'%s' = PASSWORD('" % (LOCALHOST) + dbPassword + "')"
+                query = "ALTER USER %s@%s IDENTIFIED BY %s"
+                queryArgs = (userName, LOCALHOST, dbPassword)
             else:
-                query = "SET PASSWORD FOR '" + userName + "'@'%s' = '" % (LOCALHOST) + dbPassword + "'"
+                query = "SET PASSWORD FOR %s@%s = %s"
+                queryArgs = (userName, LOCALHOST, dbPassword)
 
             if os.path.exists(ProcessUtilities.debugPath):
                 logging.CyberCPLogFileWriter.writeToFile(query)
 
-            cursor.execute(query)
+            cursor.execute(query, queryArgs)
+
+            if LOCALHOST != '127.0.0.1' and mysqlUtilities.REMOTEHOST in ('', 'localhost', '127.0.0.1'):
+                try:
+                    if encrypt == None:
+                        query = "ALTER USER %s@%s IDENTIFIED BY %s"
+                    else:
+                        query = "SET PASSWORD FOR %s@%s = %s"
+
+                    queryArgs = (userName, '127.0.0.1', dbPassword)
+
+                    if os.path.exists(ProcessUtilities.debugPath):
+                        logging.CyberCPLogFileWriter.writeToFile(query)
+
+                    cursor.execute(query, queryArgs)
+                except BaseException as msg:
+                    logging.CyberCPLogFileWriter.writeToFile(
+                        str(msg) + " [mysqlUtilities.changePassword:127.0.0.1]")
 
             connection.close()
 

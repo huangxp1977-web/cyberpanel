@@ -40,6 +40,7 @@ except:
 import re
 import os
 from plogical.processUtilities import ProcessUtilities
+from plogical.legacyWebmail import legacy_data_permission_commands
 import bcrypt
 import threading as multi
 import argparse
@@ -214,8 +215,8 @@ class MailServerManager(multi.Thread):
                     numberofEmails = int(result[0])
                     duration = result[1]
                 except:
-                    numberofEmails = 0
-                    duration = '0m'
+                    numberofEmails = None
+                    duration = None
 
                 dic = {'id': count, 'email': items.email, 'DiskUsage': '%sMB' % items.DiskUsage, 'numberofEmails': numberofEmails, 'duration': duration}
                 count = count + 1
@@ -253,15 +254,29 @@ class MailServerManager(multi.Thread):
 
             emailOwnerDomain = eUser.emailOwner
 
+            website = emailOwnerDomain.domainOwner
+            if emailOwnerDomain.childOwner_id is not None:
+                childOwner = emailOwnerDomain.childOwner
+                if website is not None and website.pk != childOwner.master_id:
+                    raise ValueError('Mail domain has inconsistent website ownership.')
+                website = childOwner.master
+            if website is None:
+                raise ValueError('Mail domain has no website owner.')
+
             admin = Administrator.objects.get(pk=userID)
-            if ACLManager.checkOwnership(eUser.emailOwner.domainOwner.domain, admin, currentACL) == 1:
+            if ACLManager.checkOwnership(website.domain, admin, currentACL) == 1:
                 pass
             else:
                 return ACLManager.loadErrorJson()
 
-            mailUtilities.deleteEmailAccount(email)
+            from plogical import storageQuota
+            retainDomain = storageQuota.has_enrollment(website)
 
-            if emailOwnerDomain.eusers_set.all().count() == 0:
+            result = mailUtilities.deleteEmailAccount(email)
+            if result[0] != 1:
+                raise ValueError(result[1])
+
+            if not retainDomain and emailOwnerDomain.eusers_set.all().count() == 0:
                 emailOwnerDomain.delete()
 
             data_ret = {'status': 1, 'deleteEmailStatus': 1, 'error_message': "None"}
@@ -1404,6 +1419,46 @@ class MailServerManager(multi.Thread):
 
                 command = "systemctl restart dovecot"
                 ProcessUtilities.executioner(command)
+
+            ## The dovecot.conf template enables the sieve (pigeonhole) plugin in the
+            ## `protocols` line and the `protocol lda` mail_plugins, but pigeonhole is
+            ## not installed by default (and on AlmaLinux 9/dovecot23 it cannot be —
+            ## the package conflicts). With the plugin absent Dovecot refuses to start
+            ## ("unknown protocol sieve") and all mail defers. Strip sieve from those
+            ## two lines only when the plugin is not installed, so servers that do
+            ## have pigeonhole keep sieve filtering. #1733
+            sieveAvailable = False
+            for modDir in ('/usr/lib/dovecot/modules', '/usr/lib64/dovecot/modules',
+                           '/usr/lib/dovecot', '/usr/lib64/dovecot'):
+                try:
+                    if os.path.isdir(modDir) and any('sieve' in fn for fn in os.listdir(modDir)):
+                        sieveAvailable = True
+                        break
+                except Exception:
+                    pass
+
+            if not sieveAvailable and os.path.exists(dovecot):
+                try:
+                    with open(dovecot, 'r') as f:
+                        confLines = f.readlines()
+                    with open(dovecot, 'w') as f:
+                        for confLine in confLines:
+                            key = confLine.split('=', 1)[0].strip()
+                            if key in ('protocols', 'mail_plugins') and 'sieve' in confLine:
+                                prefix, _, rhs = confLine.partition('=')
+                                tokens = [t for t in rhs.split() if t not in ('sieve', 'managesieve')]
+                                confLine = '%s= %s\n' % (prefix, ' '.join(tokens))
+                            f.write(confLine)
+                    logging.CyberCPLogFileWriter.writeToFile(
+                        'Sieve plugin not installed; removed sieve from dovecot.conf so Dovecot can start. [setup_postfix_dovecot_config]')
+                except BaseException as sieveMsg:
+                    logging.CyberCPLogFileWriter.writeToFile(
+                        'Could not strip sieve from dovecot.conf: %s [setup_postfix_dovecot_config]' % str(sieveMsg))
+
+            for mailSvc in ('dovecot', 'postfix'):
+                ProcessUtilities.executioner('systemctl enable %s' % mailSvc)
+            ProcessUtilities.executioner('systemctl restart dovecot')
+
         except BaseException as msg:
             logging.CyberCPLogFileWriter.statusWriter(self.extraArgs['tempStatusPath'],
                                                       '%s [setup_postfix_dovecot_config][404]' % (
@@ -1547,36 +1602,8 @@ milter_default_action = accept
         command = "chown -R root:root /usr/local/lscp"
         ProcessUtilities.executioner(command)
 
-        # Ensure SnappyMail directories exist before setting permissions
-        command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/configs/"
-        ProcessUtilities.executioner(command)
-
-        command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/domains/"
-        ProcessUtilities.executioner(command)
-
-        command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/storage/"
-        ProcessUtilities.executioner(command)
-
-        command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/temp/"
-        ProcessUtilities.executioner(command)
-
-        command = "mkdir -p /usr/local/lscp/cyberpanel/snappymail/data/_data_/_default_/cache/"
-        ProcessUtilities.executioner(command)
-
-        command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/snappymail/"
-        ProcessUtilities.executioner(command)
-
-        # Set proper permissions for data directories (group writable)
-        command = "chmod -R 775 /usr/local/lscp/cyberpanel/snappymail/data/"
-        ProcessUtilities.executioner(command)
-
-        # Ensure web server users are in the lscpd group for access
-        command = "usermod -a -G lscpd nobody 2>/dev/null || true"
-        ProcessUtilities.executioner(command)
-
-        # Fix SnappyMail public directory ownership (critical fix)
-        command = "chown -R lscpd:lscpd /usr/local/CyberCP/public/snappymail/data 2>/dev/null || true"
-        ProcessUtilities.executioner(command)
+        for command in legacy_data_permission_commands():
+            ProcessUtilities.executioner(command)
 
         command = "chmod 700 /usr/local/CyberCP/cli/cyberPanel.py"
         ProcessUtilities.executioner(command)

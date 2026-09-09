@@ -74,6 +74,11 @@
                 <a ng-click="createFolder()" class="wm-nav-link">
                     <i class="fa fa-folder-plus"></i> {% trans "New Folder" %}
                 </a>
+                {% if standalone_webmail %}
+                <a ng-click="logoutStandalone()" class="wm-nav-link">
+                    <i class="fa fa-arrow-right-from-bracket"></i> {% trans "Sign Out" %}
+                </a>
+                {% endif %}
             </div>
         </div>
 
@@ -466,6 +471,6 @@
     </div>
 </div>
 
-<script src="{% static 'webmail/webmail.js' %}?v=6"></script>
+<script src="{% static 'webmail/webmail.js' %}?v=7"></script>
 
 {% endblock %}

@@ -20,6 +20,7 @@ import subprocess
 import argparse
 import shlex
 from plogical.processUtilities import ProcessUtilities
+from plogical.legacyWebmail import legacy_data_permission_commands
 import os
 import bcrypt
 import getpass
@@ -51,177 +52,6 @@ class mailUtilities:
             print("Successfully sent email")
         except BaseException as msg:
             logging.CyberCPLogFileWriter.writeToFile(str(msg))
-    @staticmethod
-    def AfterEffects(domain):
-        path = "/usr/local/CyberCP/install/rainloop/cyberpanel.net.ini"
-
-        if not os.path.exists("/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/domains/"):
-            os.makedirs("/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/domains/")
-
-        finalPath = "/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/domains/" + domain + ".ini"
-        finalPathJson = "/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/domains/" + domain + ".json"
-
-        if not os.path.exists(finalPath):
-            shutil.copy(path, finalPath)
-
-        contentJSON = """
-{
-    "name": "%s",
-    "IMAP": {
-        "host": "localhost",
-        "port": 993,
-        "type": 1,
-        "timeout": 300,
-        "shortLogin": false,
-        "sasl": [
-            "SCRAM-SHA3-512",
-            "SCRAM-SHA-512",
-            "SCRAM-SHA-256",
-            "SCRAM-SHA-1",
-            "PLAIN",
-            "LOGIN"
-        ],
-        "ssl": {
-            "verify_peer": false,
-            "verify_peer_name": false,
-            "allow_self_signed": false,
-            "SNI_enabled": true,
-            "disable_compression": true,
-            "security_level": 1
-        },
-        "use_expunge_all_on_delete": false,
-        "fast_simple_search": true,
-        "force_select": false,
-        "message_all_headers": false,
-        "message_list_limit": 10000,
-        "search_filter": "",
-        "disabled_capabilities": []
-    },
-    "SMTP": {
-        "host": "localhost",
-        "port": 587,
-        "type": 2,
-        "timeout": 60,
-        "shortLogin": false,
-        "sasl": [
-            "SCRAM-SHA3-512",
-            "SCRAM-SHA-512",
-            "SCRAM-SHA-256",
-            "SCRAM-SHA-1",
-            "PLAIN",
-            "LOGIN"
-        ],
-        "ssl": {
-            "verify_peer": false,
-            "verify_peer_name": false,
-            "allow_self_signed": false,
-            "SNI_enabled": true,
-            "disable_compression": true,
-            "security_level": 1
-        },
-        "useAuth": true,
-        "setSender": false,
-        "usePhpMail": false,
-        "authPlainLine": false
-    },
-    "Sieve": {
-        "host": "localhost",
-        "port": 4190,
-        "type": 0,
-        "timeout": 10,
-        "shortLogin": false,
-        "sasl": [
-            "SCRAM-SHA3-512",
-            "SCRAM-SHA-512",
-            "SCRAM-SHA-256",
-            "SCRAM-SHA-1",
-            "PLAIN",
-            "LOGIN"
-        ],
-        "ssl": {
-            "verify_peer": false,
-            "verify_peer_name": false,
-            "allow_self_signed": false,
-            "SNI_enabled": true,
-            "disable_compression": true,
-            "security_level": 1
-        },
-        "enabled": false
-    },
-    "whiteList": ""
-}
-""" % (domain)
-
-        WriteToFile = open(finalPathJson, 'w')
-        WriteToFile.write(contentJSON)
-        WriteToFile.close()
-
-        command = 'chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop/data/'
-        ProcessUtilities.normalExecutioner(command)
-
-    @staticmethod
-    def InstallMailBoxFoldersPlugin():
-        ### now download and install actual plugin
-
-        labsPath = '/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/configs/application.ini'
-
-        command = f'mkdir /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'
-        ProcessUtilities.executioner(command)
-
-        command = f'chmod 700 /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'
-        ProcessUtilities.executioner(command)
-
-        command = f'chown lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'
-        ProcessUtilities.executioner(command)
-
-        command = f'wget -O /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect/index.php https://raw.githubusercontent.com/the-djmaze/snappymail/master/plugins/mailbox-detect/index.php'
-        ProcessUtilities.executioner(command)
-
-        command = f'chmod 644 /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect/index.php'
-        ProcessUtilities.executioner(command)
-
-        command = f'chown lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect/index.php'
-        ProcessUtilities.executioner(command)
-
-        ### Enable plugins and enable mailbox creation plugin
-
-        labsDataLines = open(labsPath, 'r').readlines()
-        PluginsActivator = 0
-        WriteToFile = open(labsPath, 'w')
-
-        for lines in labsDataLines:
-            if lines.find('[plugins]') > -1:
-                PluginsActivator = 1
-                WriteToFile.write(lines)
-            elif PluginsActivator and lines.find('enable = ') > -1:
-                WriteToFile.write(f'enable = On\n')
-            elif PluginsActivator and lines.find('enabled_list = ') > -1:
-                WriteToFile.write(f'enabled_list = "mailbox-detect"\n')
-            elif PluginsActivator == 1 and lines.find('[defaults]') > -1:
-                PluginsActivator = 0
-                WriteToFile.write(lines)
-            else:
-                WriteToFile.write(lines)
-        WriteToFile.close()
-
-        ## enable auto create in the enabled plugin
-        PluginsFilePath = '/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/configs/plugin-mailbox-detect.json'
-
-        WriteToFile = open(PluginsFilePath, 'w')
-        WriteToFile.write("""{
-    "plugin": {
-        "autocreate_system_folders": true
-    }
-}
-""")
-        WriteToFile.close()
-
-        command = f'chown lscpd:lscpd {PluginsFilePath}'
-        ProcessUtilities.executioner(command)
-
-        command = f'chmod 600 {PluginsFilePath}'
-        ProcessUtilities.executioner(command)
-
     @staticmethod
     def createEmailAccount(domain, userName, password, restore = None):
         try:
@@ -288,20 +118,10 @@ class mailUtilities:
                         raise BaseException("Exceeded maximum amount of email accounts allowed for the package.")
 
 
-            ## After effects
-
-            execPath = "/usr/local/CyberCP/bin/python /usr/local/CyberCP/plogical/mailUtilities.py"
-            execPath = execPath + " AfterEffects --domain " + domain
-
-            if getpass.getuser() == 'root':
-                ## This is the case when cPanel Importer is running and token is not present in enviroment.
-                ProcessUtilities.normalExecutioner(execPath)
-            else:
-                ProcessUtilities.executioner(execPath, 'lscpd')
-
-            ## After effects ends
-
             emailDomain = Domains.objects.get(domain=domain)
+
+            from plogical import storageQuota
+            storageQuota.ensure_mail_domain(emailDomain, website.master if ChildCheck else website)
 
             #emailAcct = EUsers(emailOwner=emailDomain, email=finalEmailUsername, password=hash.hexdigest())
 
@@ -366,9 +186,6 @@ class mailUtilities:
             # Ensure final ownership
             command = f"chown -R vmail:vmail '{maildir_base}'"
             ProcessUtilities.executioner(command, 'root')
-
-            #if not os.path.exists('/usr/local/lscp/cyberpanel/rainloop/data/_data_/_default_/plugins/mailbox-detect'):
-            #    mailUtilities.InstallMailBoxFoldersPlugin()
 
             print("1,None")
             return 1,"None"
@@ -2378,6 +2195,51 @@ class MailServerManagerUtils(multi.Thread):
                 command = "sed -i 's|daemon_directory = /usr/libexec/postfix|daemon_directory = /usr/lib/postfix/sbin|g' /etc/postfix/main.cf"
                 ProcessUtilities.executioner(command)
 
+            ## The default dovecot.conf template enables the sieve (pigeonhole)
+            ## plugin in the `protocols` line and the `protocol lda` mail_plugins.
+            ## The base CyberPanel install does not ship pigeonhole, and on some
+            ## systems it cannot be installed (e.g. dovecot23 on AlmaLinux 9, where
+            ## pigeonhole conflicts). When the plugin is absent Dovecot refuses to
+            ## start ("unknown protocol sieve") and all mail is deferred. Strip
+            ## sieve from those two lines only when the plugin is not installed, so
+            ## servers that do have pigeonhole keep sieve filtering. #1733
+            dovecotConf = '/etc/dovecot/dovecot.conf'
+            sieveAvailable = False
+            for modDir in ('/usr/lib/dovecot/modules', '/usr/lib64/dovecot/modules',
+                           '/usr/lib/dovecot', '/usr/lib64/dovecot'):
+                try:
+                    if os.path.isdir(modDir) and any('sieve' in fn for fn in os.listdir(modDir)):
+                        sieveAvailable = True
+                        break
+                except Exception:
+                    pass
+
+            if not sieveAvailable and os.path.exists(dovecotConf):
+                try:
+                    with open(dovecotConf, 'r') as f:
+                        confLines = f.readlines()
+                    with open(dovecotConf, 'w') as f:
+                        for confLine in confLines:
+                            key = confLine.split('=', 1)[0].strip()
+                            if key in ('protocols', 'mail_plugins') and 'sieve' in confLine:
+                                prefix, _, rhs = confLine.partition('=')
+                                tokens = [t for t in rhs.split() if t not in ('sieve', 'managesieve')]
+                                confLine = '%s= %s\n' % (prefix, ' '.join(tokens))
+                            f.write(confLine)
+                    logging.CyberCPLogFileWriter.writeToFile(
+                        'Sieve plugin not installed; removed sieve from dovecot.conf so Dovecot can start. [setup_postfix_dovecot_config]')
+                except BaseException as sieveMsg:
+                    logging.CyberCPLogFileWriter.writeToFile(
+                        'Could not strip sieve from dovecot.conf: %s [setup_postfix_dovecot_config]' % str(sieveMsg))
+
+            ## Make sure the mail services are enabled so they survive a reboot;
+            ## previously the reset never enabled them and users had to do it by
+            ## hand. Restart dovecot now so the sieve fix above takes effect and a
+            ## bad config surfaces here; postfix is restarted at the end of the
+            ## reset, after its DKIM/milter config is written. #1733
+            for mailSvc in ('dovecot', 'postfix'):
+                ProcessUtilities.executioner('systemctl enable %s' % mailSvc)
+            ProcessUtilities.executioner('systemctl restart dovecot')
 
         except BaseException as msg:
             logging.CyberCPLogFileWriter.statusWriter(self.extraArgs['tempStatusPath'],
@@ -2426,8 +2288,8 @@ class MailServerManagerUtils(multi.Thread):
         command = "chown -R root:root /usr/local/lscp"
         ProcessUtilities.executioner(command)
 
-        command = "chown -R lscpd:lscpd /usr/local/lscp/cyberpanel/rainloop/data"
-        ProcessUtilities.executioner(command)
+        for command in legacy_data_permission_commands():
+            ProcessUtilities.executioner(command)
 
         command = "chmod 700 /usr/local/CyberCP/cli/cyberPanel.py"
         ProcessUtilities.executioner(command)
@@ -2717,11 +2579,15 @@ class MailServerManagerUtils(multi.Thread):
                 writeToFile.write('nameserver 8.8.8.8\n')
                 writeToFile.close()
 
-                command = 'systemctl restart postfix'
-                ProcessUtilities.executioner(command)
+            ## Always restart the mail services at the end of the reset so the new
+            ## postfix (incl. DKIM/milter) and dovecot config actually take effect.
+            ## This previously only ran when /etc/resolv.conf happened to be empty,
+            ## so most resets left the services running the old config. #1733
+            command = 'systemctl restart postfix'
+            ProcessUtilities.executioner(command)
 
-                command = 'doveadm reload'
-                ProcessUtilities.executioner(command)
+            command = 'systemctl restart dovecot'
+            ProcessUtilities.executioner(command)
 
             logging.CyberCPLogFileWriter.statusWriter(self.extraArgs['tempStatusPath'], 'Completed [200].')
 
@@ -2870,8 +2736,6 @@ def main():
         mailUtilities.changeRedisxConfig("install", "changeRedisxConfig")
     elif args.function == 'changeclamavConfig':
         mailUtilities.changeclamavConfig("install", "changeclamavConfig")
-    elif args.function == 'AfterEffects':
-        mailUtilities.AfterEffects(args.domain)
     elif args.function == "ResetEmailConfigurations":
         extraArgs = {'tempStatusPath': args.tempStatusPath}
         background = MailServerManagerUtils(None, 'ResetEmailConfigurations', extraArgs)

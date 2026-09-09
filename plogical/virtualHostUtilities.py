@@ -1,6 +1,7 @@
 #!/usr/local/CyberCP/bin/python
 import os
 import os.path
+import re
 import sys
 import time
 
@@ -30,6 +31,7 @@ from plogical.processUtilities import ProcessUtilities
 from ApachController.ApacheController import ApacheController
 from ApachController.ApacheVhosts import ApacheVhost
 from managePHP.phpManager import PHPManager
+from plogical.domainAliasUtilities import remove_alias_from_map_line
 
 try:
     from websiteFunctions.models import Websites, ChildDomains, aliasDomains, WPSites, WPStaging
@@ -163,7 +165,7 @@ class virtualHostUtilities:
             logging.CyberCPLogFileWriter.writeToFile(message)
 
             try:
-                with open(filePath, 'r') as f:
+                with open(filePath, 'rb') as f:
                     x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
                 
                 # Safely extract SSL provider from issuer components
@@ -209,7 +211,7 @@ class virtualHostUtilities:
                 ### once SSL is issued, re-read the SSL file and check if valid ssl got issued.
 
                 try:
-                    with open(filePath, 'r') as f:
+                    with open(filePath, 'rb') as f:
                         x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
                     
                     # Safely extract SSL provider from issuer components
@@ -373,7 +375,7 @@ class virtualHostUtilities:
             virtualHostUtilities.issueSSLForHostName(Domain, path, 1)
 
             try:
-                with open(filePath, 'r') as f:
+                with open(filePath, 'rb') as f:
                     x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
                 
                 # Safely extract SSL provider from issuer components
@@ -409,7 +411,7 @@ class virtualHostUtilities:
                 virtualHostUtilities.issueSSLForMailServer(Domain, path)
 
                 try:
-                    with open(filePath, 'r') as f:
+                    with open(filePath, 'rb') as f:
                         x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
 
                     # Safely extract SSL provider from issuer components
@@ -458,6 +460,39 @@ class virtualHostUtilities:
                 logging.CyberCPLogFileWriter.statusWriter(tempStatusPath, 'Hostname setup completed (without email configuration). [200]')
 
     @staticmethod
+    def getDovecotSNIBlock(domains, dovecotContent):
+        if 'dovecot_config_version = 2.4.0' in dovecotContent:
+            certSetting = 'ssl_server_cert_file'
+            keySetting = 'ssl_server_key_file'
+            fileMarker = ''
+        else:
+            certSetting = 'ssl_cert'
+            keySetting = 'ssl_key'
+            fileMarker = '<'
+
+        blocks = []
+        for domain in domains:
+            blocks.append("""local_name %s {
+        %s = %s/etc/letsencrypt/live/%s/fullchain.pem
+        %s = %s/etc/letsencrypt/live/%s/privkey.pem
+}""" % (domain, certSetting, fileMarker, domain,
+           keySetting, fileMarker, domain))
+
+        return '\n' + '\n'.join(blocks) + '\n'
+
+    @staticmethod
+    def normalizeDovecotSNIPaths(dovecotContent):
+        if 'dovecot_config_version = 2.4.0' not in dovecotContent:
+            return dovecotContent
+
+        return re.sub(
+            r'^(\s*ssl_server_(?:cert|key)_file\s*=\s*)<(?=/)',
+            r'\1',
+            dovecotContent,
+            flags=re.MULTILINE,
+        )
+
+    @staticmethod
     def setupAutoDiscover(mailDomain, tempStatusPath, virtualHostName, admin):
         # Check if email services are installed before proceeding
         if not virtualHostUtilities.emailServicesInstalled():
@@ -485,15 +520,8 @@ class virtualHostUtilities:
                 dovecotContent = open(dovecotPath, 'r').read()
 
                 if dovecotContent.find('/live/%s/' % (childDomain)) == -1:
-                    content = """\nlocal_name %s {
-        ssl_cert = </etc/letsencrypt/live/%s/fullchain.pem
-        ssl_key = </etc/letsencrypt/live/%s/privkey.pem
-}
-local_name %s {
-        ssl_cert = </etc/letsencrypt/live/%s/fullchain.pem
-        ssl_key = </etc/letsencrypt/live/%s/privkey.pem
-}
-\n""" % (childDomain, childDomain, childDomain, virtualHostName, virtualHostName, virtualHostName)
+                    content = virtualHostUtilities.getDovecotSNIBlock(
+                        [childDomain, virtualHostName], dovecotContent)
 
                     writeToFile = open(dovecotPath, 'a')
                     writeToFile.write(content)
@@ -548,12 +576,8 @@ local_name %s {
             dovecotContent = open(dovecotPath, 'r').read()
 
             if dovecotContent.find('/live/%s/' % (virtualHostName)) == -1:
-                content = """
-local_name %s {
-        ssl_cert = </etc/letsencrypt/live/%s/fullchain.pem
-        ssl_key = </etc/letsencrypt/live/%s/privkey.pem
-}
-""" % (virtualHostName, virtualHostName, virtualHostName)
+                content = virtualHostUtilities.getDovecotSNIBlock(
+                    [virtualHostName], dovecotContent)
 
                 writeToFile = open(dovecotPath, 'a')
                 writeToFile.write(content)
@@ -916,11 +940,10 @@ local_name %s {
 
             groupName = 'nobody'
 
-            numberOfTotalLines = int(
-                ProcessUtilities.outputExecutioner('wc -l %s' % (fileName), groupName).split(" ")[0])
+            numberOfTotalLines = virtualHostUtilities.getLogLineCount(fileName, groupName)
 
             if numberOfTotalLines < 25:
-                data = ProcessUtilities.outputExecutioner('cat %s' % (fileName), groupName)
+                data = ProcessUtilities.outputExecutioner('cat -- %s' % shlex.quote(fileName), groupName)
             else:
                 if page == 1:
                     end = numberOfTotalLines
@@ -928,7 +951,7 @@ local_name %s {
                     if start <= 0:
                         start = 1
                     startingAndEnding = "'" + str(start) + "," + str(end) + "p'"
-                    command = "sed -n " + startingAndEnding + " " + fileName
+                    command = "sed -n " + startingAndEnding + " -- " + shlex.quote(fileName)
                     data = ProcessUtilities.outputExecutioner(command, groupName)
                 else:
                     end = numberOfTotalLines - ((page - 1) * 25)
@@ -936,7 +959,7 @@ local_name %s {
                     if start <= 0:
                         start = 1
                     startingAndEnding = "'" + str(start) + "," + str(end) + "p'"
-                    command = "sed -n " + startingAndEnding + " " + fileName
+                    command = "sed -n " + startingAndEnding + " -- " + shlex.quote(fileName)
                     data = ProcessUtilities.outputExecutioner(command, groupName)
             print(data)
             return data
@@ -954,11 +977,10 @@ local_name %s {
                 print("0, %s file is symlinked." % (fileName))
                 return 0
 
-            numberOfTotalLines = int(
-                ProcessUtilities.outputExecutioner('wc -l %s' % (fileName), externalApp).split(" ")[0])
+            numberOfTotalLines = virtualHostUtilities.getLogLineCount(fileName, externalApp)
 
             if numberOfTotalLines < 25:
-                data = ProcessUtilities.outputExecutioner('cat %s' % (fileName), externalApp)
+                data = ProcessUtilities.outputExecutioner('cat -- %s' % shlex.quote(fileName), externalApp)
             else:
                 if page == 1:
                     end = numberOfTotalLines
@@ -966,7 +988,7 @@ local_name %s {
                     if start <= 0:
                         start = 1
                     startingAndEnding = "'" + str(start) + "," + str(end) + "p'"
-                    command = "sed -n " + startingAndEnding + " " + fileName
+                    command = "sed -n " + startingAndEnding + " -- " + shlex.quote(fileName)
                     data = ProcessUtilities.outputExecutioner(command, externalApp)
                 else:
                     end = numberOfTotalLines - ((page - 1) * 25)
@@ -974,7 +996,7 @@ local_name %s {
                     if start <= 0:
                         start = 1
                     startingAndEnding = "'" + str(start) + "," + str(end) + "p'"
-                    command = "sed -n " + startingAndEnding + " " + fileName
+                    command = "sed -n " + startingAndEnding + " -- " + shlex.quote(fileName)
                     data = ProcessUtilities.outputExecutioner(command, externalApp)
             print(data)
             return data
@@ -983,6 +1005,17 @@ local_name %s {
                 str(msg) + "  [getErrorLogs]")
             print("1,None")
             return "1,None"
+
+    @staticmethod
+    def getLogLineCount(fileName, externalApp):
+        output = ProcessUtilities.outputExecutioner(
+            'wc -l -- %s' % shlex.quote(fileName), externalApp)
+        first_field = str(output or '').split(None, 1)
+
+        if not first_field or not first_field[0].isdigit():
+            raise ValueError('Unable to determine the log line count.')
+
+        return int(first_field[0])
 
     @staticmethod
     def saveVHostConfigs(fileName, tempPath):
@@ -1307,24 +1340,24 @@ local_name %s {
 
             installUtilities.installUtilities.reStartLiteSpeed()
 
-            if ssl == 1:
-                retValues = sslUtilities.issueSSLForDomain(masterDomain, administratorEmail, sslPath, aliasDomain)
-                if ProcessUtilities.decideServer() == ProcessUtilities.OLS:
-                    if retValues[0] == 0:
-                        print("0," + str(retValues[1]))
-                        return
-                    else:
-                        vhost.createAliasSSLMap(confPath, masterDomain, aliasDomain)
-                else:
-                    retValues = sslUtilities.issueSSLForDomain(masterDomain, administratorEmail, sslPath, aliasDomain)
-                    if retValues[0] == 0:
-                        print("0," + str(retValues[1]))
-                        return
-
             website = Websites.objects.get(domain=masterDomain)
 
-            newAlias = aliasDomains(master=website, aliasDomain=aliasDomain)
-            newAlias.save()
+            ## Persist the alias in the DB as soon as its vhost config exists.
+            ## Previously the save happened only AFTER SSL issuance, so a failed
+            ## SSL attempt returned early and left the alias present in the server
+            ## config but missing from the aliasDomains table — which then made
+            ## both "Issue SSL" and "Delete" for that alias fail with
+            ## "aliasDomains matching query does not exist". #1738
+            if not aliasDomains.objects.filter(master=website, aliasDomain=aliasDomain).exists():
+                aliasDomains(master=website, aliasDomain=aliasDomain).save()
+
+            if ssl == 1:
+                retValues = sslUtilities.issueSSLForDomain(masterDomain, administratorEmail, sslPath, aliasDomain)
+                if retValues[0] == 0:
+                    print("0," + str(retValues[1]))
+                    return
+                if ProcessUtilities.decideServer() == ProcessUtilities.OLS:
+                    vhost.createAliasSSLMap(confPath, masterDomain, aliasDomain)
 
             print("1,None")
 
@@ -1366,38 +1399,17 @@ local_name %s {
 
                 data = open(confPath, 'r').readlines()
                 writeToFile = open(confPath, 'w')
-                aliases = []
 
                 for items in data:
-                    if items.find(masterDomain) > -1 and items.find('map') > -1:
-                        data = [_f for _f in items.split(" ") if _f]
-                        if data[1] == masterDomain:
-                            length = len(data)
-                            for i in range(3, length):
-                                currentAlias = data[i].rstrip(',').strip('\n')
-                                if currentAlias != aliasDomain:
-                                    aliases.append(currentAlias)
-
-                            aliasString = ""
-
-                            for alias in aliases:
-                                aliasString = ", " + alias
-
-                            writeToFile.writelines(
-                                '  map                     ' + masterDomain + " " + masterDomain + aliasString + "\n")
-                            aliases = []
-                            aliasString = ""
-                        else:
-                            writeToFile.writelines(items)
-
-                    else:
-                        writeToFile.writelines(items)
+                    writeToFile.writelines(
+                        remove_alias_from_map_line(items, masterDomain, aliasDomain))
 
                 writeToFile.close()
                 installUtilities.installUtilities.reStartLiteSpeed()
 
-                delAlias = aliasDomains.objects.get(aliasDomain=aliasDomain)
-                delAlias.delete()
+                ## Scope to the master and use filter().delete() so removing an
+                ## orphaned alias (config present, DB row missing) does not raise. #1738
+                aliasDomains.objects.filter(aliasDomain=aliasDomain, master__domain=masterDomain).delete()
 
                 print("1,None")
             except BaseException as msg:
@@ -1420,8 +1432,9 @@ local_name %s {
                 writeToFile.close()
                 installUtilities.installUtilities.reStartLiteSpeed()
 
-                alias = aliasDomains.objects.get(aliasDomain=aliasDomain)
-                alias.delete()
+                ## Scope to the master and use filter().delete() so removing an
+                ## orphaned alias (config present, DB row missing) does not raise. #1738
+                aliasDomains.objects.filter(aliasDomain=aliasDomain, master__domain=masterDomain).delete()
 
                 print("1,None")
             except BaseException as msg:
@@ -1761,6 +1774,12 @@ local_name %s {
 
             delWebsite.delete()
             installUtilities.installUtilities.reStartLiteSpeed()
+
+            try:
+                sslUtilities.removeSSLForDomain(virtualHostName)
+            except BaseException as msg:
+                logging.CyberCPLogFileWriter.writeToFile(
+                    str(msg) + "  [deleteDomain:removeSSLForDomain]")
 
             print("1,None")
             return 1, 'None'
