@@ -2477,8 +2477,7 @@ Require valid-user
             if data['path'].find('..') > -1:
                 return ACLManager.loadErrorJson('createWebSiteStatus', 0)
 
-            if currentACL['admin'] != 1:
-                data['openBasedir'] = 1
+            data['openBasedir'] = 1
 
             if alias == 0:
 
